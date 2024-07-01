@@ -79,8 +79,7 @@ int builtin_main(int argc, char *argv[], void *userdata) {
         UdevBuiltinCommand cmd;
         int r;
 
-        log_set_max_level(LOG_DEBUG);
-        log_parse_environment();
+        log_setup();
 
         r = parse_argv(argc, argv);
         if (r <= 0)
@@ -100,7 +99,7 @@ int builtin_main(int argc, char *argv[], void *userdata) {
                 goto finish;
         }
 
-        event = udev_event_new(dev, NULL);
+        event = udev_event_new(dev, NULL, EVENT_UDEVADM_TEST_BUILTIN);
         if (!event) {
                 r = log_oom();
                 goto finish;
@@ -115,7 +114,7 @@ int builtin_main(int argc, char *argv[], void *userdata) {
                 }
         }
 
-        r = udev_builtin_run(event, cmd, arg_command, true);
+        r = udev_builtin_run(event, cmd, arg_command);
         if (r < 0) {
                 log_debug_errno(r, "Builtin command '%s' fails: %m", arg_command);
                 goto finish;

@@ -47,6 +47,7 @@ sources = files(
         'networkd-dhcp4.c',
         'networkd-dhcp6-bus.c',
         'networkd-dhcp6.c',
+        'networkd-dns.c',
         'networkd-ipv4acd.c',
         'networkd-ipv4ll.c',
         'networkd-ipv6-proxy-ndp.c',
@@ -65,6 +66,7 @@ sources = files(
         'networkd-network-bus.c',
         'networkd-network.c',
         'networkd-nexthop.c',
+        'networkd-ntp.c',
         'networkd-queue.c',
         'networkd-radv.c',
         'networkd-route.c',
@@ -147,8 +149,7 @@ if get_option('link-networkd-shared')
         networkd_link_with = [libshared]
 else
         networkd_link_with = [libsystemd_static,
-                              libshared_static,
-                              libbasic_gcrypt]
+                              libshared_static]
 endif
 
 network_includes = [libsystemd_network_includes, include_directories(['.', 'netdev', 'tc'])]

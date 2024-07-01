@@ -313,6 +313,11 @@ units = [
         { 'file' : 'systemd-growfs@.service.in' },
         { 'file' : 'systemd-halt.service' },
         {
+          'file' : 'systemd-hibernate-clear.service.in',
+          'conditions' : ['ENABLE_HIBERNATE', 'ENABLE_EFI'],
+          'symlinks' : ['sysinit.target.wants/'],
+        },
+        {
           'file' : 'systemd-hibernate-resume.service.in',
           'conditions' : ['ENABLE_HIBERNATE'],
         },
@@ -357,6 +362,11 @@ units = [
           'symlinks' : ['dbus-org.freedesktop.import1.service'],
         },
         {
+          'file' : 'systemd-importd.socket',
+          'conditions' : ['ENABLE_IMPORTD'],
+          'symlinks' : ['sockets.target.wants/'],
+        },
+        {
           'file' : 'systemd-initctl.service.in',
           'conditions' : ['HAVE_SYSV_COMPAT'],
         },
@@ -398,6 +408,7 @@ units = [
           'file' : 'systemd-journald-dev-log.socket',
           'symlinks' : ['sockets.target.wants/'],
         },
+        { 'file' : 'systemd-journald-sync@.service' },
         { 'file' : 'systemd-journald-varlink@.socket' },
         {
           'file' : 'systemd-journald.service.in',
@@ -683,6 +694,7 @@ units = [
           'conditions' : ['ENABLE_TMPFILES'],
           'symlinks' : ['sysinit.target.wants/'],
         },
+        { 'file' : 'systemd-udev-load-credentials.service' },
         { 'file' : 'systemd-udev-settle.service' },
         {
           'file' : 'systemd-udev-trigger.service',
@@ -726,6 +738,22 @@ units = [
         {
           'file' : 'systemd-userdbd.socket',
           'conditions' : ['ENABLE_USERDB'],
+        },
+        {
+          'file' : 'systemd-mountfsd.service.in',
+          'conditions' : ['ENABLE_MOUNTFSD'],
+        },
+        {
+          'file' : 'systemd-mountfsd.socket',
+          'conditions' : ['ENABLE_MOUNTFSD'],
+        },
+        {
+          'file' : 'systemd-nsresourced.service.in',
+          'conditions' : ['ENABLE_NSRESOURCED'],
+        },
+        {
+          'file' : 'systemd-nsresourced.socket',
+          'conditions' : ['ENABLE_NSRESOURCED'],
         },
         {
           'file' : 'systemd-vconsole-setup.service.in',

@@ -25,11 +25,11 @@
 #include "virt.h"
 
 static const UnitActiveState state_translation_table[_TIMER_STATE_MAX] = {
-        [TIMER_DEAD] = UNIT_INACTIVE,
+        [TIMER_DEAD]    = UNIT_INACTIVE,
         [TIMER_WAITING] = UNIT_ACTIVE,
         [TIMER_RUNNING] = UNIT_ACTIVE,
         [TIMER_ELAPSED] = UNIT_ACTIVE,
-        [TIMER_FAILED] = UNIT_FAILED
+        [TIMER_FAILED]  = UNIT_FAILED,
 };
 
 static int timer_dispatch(sd_event_source *s, uint64_t usec, void *userdata);
@@ -514,7 +514,6 @@ static void timer_enter_waiting(Timer *t, bool time_change) {
                                 goto fail;
                         }
                 } else {
-
                         r = sd_event_add_time(
                                         UNIT(t)->manager->event,
                                         &t->monotonic_event_source,
@@ -529,8 +528,7 @@ static void timer_enter_waiting(Timer *t, bool time_change) {
                         (void) sd_event_source_set_description(t->monotonic_event_source, "timer-monotonic");
                 }
 
-        } else if (t->monotonic_event_source) {
-
+        } else {
                 r = sd_event_source_set_enabled(t->monotonic_event_source, SD_EVENT_OFF);
                 if (r < 0) {
                         log_unit_warning_errno(UNIT(t), r, "Failed to disable monotonic event source: %m");
@@ -993,7 +991,7 @@ static const char* const timer_base_table[_TIMER_BASE_MAX] = {
         [TIMER_STARTUP]       = "OnStartupSec",
         [TIMER_UNIT_ACTIVE]   = "OnUnitActiveSec",
         [TIMER_UNIT_INACTIVE] = "OnUnitInactiveSec",
-        [TIMER_CALENDAR]      = "OnCalendar"
+        [TIMER_CALENDAR]      = "OnCalendar",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(timer_base, TimerBase);

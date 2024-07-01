@@ -151,7 +151,7 @@ static const char *const static_signal_table[] = {
 
 DEFINE_PRIVATE_STRING_TABLE_LOOKUP(static_signal, int);
 
-const char *signal_to_string(int signo) {
+const char* signal_to_string(int signo) {
         static thread_local char buf[STRLEN("RTMIN+") + DECIMAL_STR_MAX(int)];
         const char *name;
 
@@ -268,7 +268,7 @@ int pop_pending_signal_internal(int sig, ...) {
         if (r < 0)
                 return r;
 
-        r = sigtimedwait(&ss, NULL, &(struct timespec) { 0, 0 });
+        r = sigtimedwait(&ss, NULL, &(const struct timespec) {});
         if (r < 0) {
                 if (errno == EAGAIN)
                         return 0;

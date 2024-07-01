@@ -47,7 +47,6 @@ if get_option('link-journalctl-shared')
         journalctl_link_with = [libshared]
 else
         journalctl_link_with = [
-                libbasic_gcrypt,
                 libshared_static,
                 libsystemd_static,
         ]
@@ -122,6 +121,12 @@ executables += [
                         libselinux,
                         libxz_cflags,
                 ],
+        },
+        test_template + {
+                'sources' : files(
+                        'test-journald-rate-limit.c',
+                        'journald-rate-limit.c',
+                ),
         },
         journal_test_template + {
                 'sources' : files('test-journald-syslog.c'),
