@@ -60,7 +60,7 @@ int umount_recursive_full(const char *prefix, int flags, char **keep) {
                 _cleanup_(mnt_free_iterp) struct libmnt_iter *iter = NULL;
                 bool again = false;
 
-                r = libmount_parse("/proc/self/mountinfo", f, &table, &iter);
+                r = libmount_parse_mountinfo(f, &table, &iter);
                 if (r < 0)
                         return log_debug_errno(r, "Failed to parse /proc/self/mountinfo: %m");
 
@@ -217,7 +217,7 @@ int bind_remount_recursive_with_mountinfo(
 
                 rewind(proc_self_mountinfo);
 
-                r = libmount_parse("/proc/self/mountinfo", proc_self_mountinfo, &table, &iter);
+                r = libmount_parse_mountinfo(proc_self_mountinfo, &table, &iter);
                 if (r < 0)
                         return log_debug_errno(r, "Failed to parse /proc/self/mountinfo: %m");
 
@@ -542,7 +542,7 @@ int mount_switch_root_full(const char *path, unsigned long mount_propagation_fla
         if (mount_propagation_flag == 0)
                 return 0;
 
-        if (mount(NULL, ".", NULL, mount_propagation_flag | MS_REC, 0) < 0)
+        if (mount(NULL, ".", NULL, mount_propagation_flag | MS_REC, NULL) < 0)
                 return log_debug_errno(errno, "Failed to turn new rootfs '%s' into %s mount: %m",
                                        mount_propagation_flag_to_string(mount_propagation_flag), path);
 
@@ -736,16 +736,62 @@ int mount_verbose_full(
 
 int umount_verbose(
                 int error_log_level,
-                const char *what,
+                const char *where,
                 int flags) {
 
-        assert(what);
+        assert(where);
 
-        log_debug("Umounting %s...", what);
+        log_debug("Unmounting '%s'...", where);
 
-        if (umount2(what, flags) < 0)
-                return log_full_errno(error_log_level, errno,
-                                      "Failed to unmount %s: %m", what);
+        if (umount2(where, flags) < 0)
+                return log_full_errno(error_log_level, errno, "Failed to unmount '%s': %m", where);
+
+        return 0;
+}
+
+int umountat_detach_verbose(
+                int error_log_level,
+                int fd,
+                const char *where) {
+
+        /* Similar to umountat_verbose(), but goes by fd + path. This implies MNT_DETACH, since to do this we
+         * must pin the inode in question via an fd. */
+
+        assert(fd >= 0 || fd == AT_FDCWD);
+
+        /* If neither fd nor path are specified take this as reference to the cwd */
+        if (fd == AT_FDCWD && isempty(where))
+                return umount_verbose(error_log_level, ".", MNT_DETACH|UMOUNT_NOFOLLOW);
+
+        /* If we don't actually take the fd into consideration for this operation shortcut things, so that we
+         * don't have to open the inode */
+        if (fd == AT_FDCWD || path_is_absolute(where))
+                return umount_verbose(error_log_level, where, MNT_DETACH|UMOUNT_NOFOLLOW);
+
+        _cleanup_free_ char *prefix = NULL;
+        const char *p;
+        if (fd_get_path(fd, &prefix) < 0)
+                p = "<fd>"; /* if we can't get the path, return something vaguely useful */
+        else
+                p = prefix;
+        _cleanup_free_ char *joined = isempty(where) ? strdup(p) : path_join(p, where);
+
+        log_debug("Unmounting '%s'...", strna(joined));
+
+        _cleanup_close_ int inode_fd = -EBADF;
+        int mnt_fd;
+        if (isempty(where))
+                mnt_fd = fd;
+        else {
+                inode_fd = openat(fd, where, O_PATH|O_CLOEXEC|O_NOFOLLOW);
+                if (inode_fd < 0)
+                        return log_full_errno(error_log_level, errno, "Failed to pin '%s': %m", strna(joined));
+
+                mnt_fd = inode_fd;
+        }
+
+        if (umount2(FORMAT_PROC_FD_PATH(mnt_fd), MNT_DETACH) < 0)
+                return log_full_errno(error_log_level, errno, "Failed to unmount '%s': %m", strna(joined));
 
         return 0;
 }
@@ -1300,7 +1346,7 @@ int fd_make_mount_point(int fd) {
 
         assert(fd >= 0);
 
-        r = fd_is_mount_point(fd, NULL, 0);
+        r = is_mount_point_at(fd, NULL, 0);
         if (r < 0)
                 return log_debug_errno(r, "Failed to determine whether file descriptor is a mount point: %m");
         if (r > 0)
@@ -1313,9 +1359,15 @@ int fd_make_mount_point(int fd) {
         return 1;
 }
 
-int make_userns(uid_t uid_shift, uid_t uid_range, uid_t source_owner, uid_t dest_owner, RemountIdmapping idmapping) {
+int make_userns(uid_t uid_shift,
+                uid_t uid_range,
+                uid_t source_owner,
+                uid_t dest_owner,
+                RemountIdmapping idmapping) {
+
         _cleanup_close_ int userns_fd = -EBADF;
         _cleanup_free_ char *line = NULL;
+        uid_t source_base = 0;
 
         /* Allocates a userns file descriptor with the mapping we need. For this we'll fork off a child
          * process whose only purpose is to give us a new user namespace. It's killed when we got it. */
@@ -1323,8 +1375,18 @@ int make_userns(uid_t uid_shift, uid_t uid_range, uid_t source_owner, uid_t dest
         if (!userns_shift_range_valid(uid_shift, uid_range))
                 return log_debug_errno(SYNTHETIC_ERRNO(EINVAL), "Invalid UID range for user namespace.");
 
-        if (IN_SET(idmapping, REMOUNT_IDMAPPING_NONE, REMOUNT_IDMAPPING_HOST_ROOT)) {
-                if (asprintf(&line, UID_FMT " " UID_FMT " " UID_FMT "\n", 0u, uid_shift, uid_range) < 0)
+        switch (idmapping) {
+
+        case REMOUNT_IDMAPPING_FOREIGN_WITH_HOST_ROOT:
+                source_base = FOREIGN_UID_BASE;
+                _fallthrough_;
+
+        case REMOUNT_IDMAPPING_NONE:
+        case REMOUNT_IDMAPPING_HOST_ROOT:
+
+                if (asprintf(&line,
+                             UID_FMT " " UID_FMT " " UID_FMT "\n",
+                             source_base, uid_shift, uid_range) < 0)
                         return log_oom_debug();
 
                 /* If requested we'll include an entry in the mapping so that the host root user can make
@@ -1341,28 +1403,34 @@ int make_userns(uid_t uid_shift, uid_t uid_range, uid_t source_owner, uid_t dest
                 if (idmapping == REMOUNT_IDMAPPING_HOST_ROOT)
                         if (strextendf(&line,
                                        UID_FMT " " UID_FMT " " UID_FMT "\n",
-                                       UID_MAPPED_ROOT, 0u, 1u) < 0)
+                                       UID_MAPPED_ROOT, (uid_t) 0u, (uid_t) 1u) < 0)
                                 return log_oom_debug();
-        }
 
-        if (idmapping == REMOUNT_IDMAPPING_HOST_OWNER) {
+                break;
+
+        case REMOUNT_IDMAPPING_HOST_OWNER:
                 /* Remap the owner of the bind mounted directory to the root user within the container. This
                  * way every file written by root within the container to the bind-mounted directory will
                  * be owned by the original user from the host. All other users will remain unmapped. */
-                if (asprintf(&line, UID_FMT " " UID_FMT " " UID_FMT "\n", source_owner, uid_shift, 1u) < 0)
+                if (asprintf(&line,
+                             UID_FMT " " UID_FMT " " UID_FMT "\n",
+                             source_owner, uid_shift, (uid_t) 1u) < 0)
                         return log_oom_debug();
-        }
+                break;
 
-        if (idmapping == REMOUNT_IDMAPPING_HOST_OWNER_TO_TARGET_OWNER) {
+        case REMOUNT_IDMAPPING_HOST_OWNER_TO_TARGET_OWNER:
                 /* Remap the owner of the bind mounted directory to the owner of the target directory
                  * within the container. This way every file written by target directory owner within the
                  * container to the bind-mounted directory will be owned by the original host user.
                  * All other users will remain unmapped. */
-                if (asprintf(
-                             &line,
+                if (asprintf(&line,
                              UID_FMT " " UID_FMT " " UID_FMT "\n",
-                             source_owner, dest_owner, 1u) < 0)
+                             source_owner, dest_owner, (uid_t) 1u) < 0)
                         return log_oom_debug();
+                break;
+
+        default:
+                assert_not_reached();
         }
 
         /* We always assign the same UID and GID ranges */
@@ -1503,7 +1571,7 @@ int get_sub_mounts(const char *prefix, SubMount **ret_mounts, size_t *ret_n_moun
         assert(ret_mounts);
         assert(ret_n_mounts);
 
-        r = libmount_parse("/proc/self/mountinfo", NULL, &table, &iter);
+        r = libmount_parse_mountinfo(/* source = */ NULL, &table, &iter);
         if (r < 0)
                 return log_debug_errno(r, "Failed to parse /proc/self/mountinfo: %m");
 
@@ -1826,7 +1894,12 @@ static int path_get_mount_info_at(
         if (r < 0)
                 return log_debug_errno(r, "Failed to get mount ID: %m");
 
-        r = libmount_parse("/proc/self/mountinfo", NULL, &table, &iter);
+        /* When getting options is requested, we also need to parse utab, otherwise userspace options like
+         * "_netdev" will be lost. */
+        if (ret_options)
+                r = libmount_parse_with_utab(&table, &iter);
+        else
+                r = libmount_parse_mountinfo(/* source = */ NULL, &table, &iter);
         if (r < 0)
                 return log_debug_errno(r, "Failed to parse /proc/self/mountinfo: %m");
 

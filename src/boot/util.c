@@ -172,7 +172,7 @@ EFI_STATUS file_read(
         assert(name);
         assert(ret);
 
-        _cleanup_(file_closep) EFI_FILE *handle = NULL;
+        _cleanup_file_close_ EFI_FILE *handle = NULL;
         err = dir->Open(dir, &handle, (char16_t*) name, EFI_FILE_MODE_READ, 0ULL);
         if (err != EFI_SUCCESS)
                 return err;
@@ -280,8 +280,7 @@ EFI_STATUS readdir(
 
         if (sz == 0) {
                 /* End of directory */
-                free(*buffer);
-                *buffer = NULL;
+                *buffer = mfree(*buffer);
                 *buffer_size = 0;
         }
 
@@ -306,8 +305,7 @@ char16_t **strv_free(char16_t **v) {
         for (char16_t **i = v; *i; i++)
                 free(*i);
 
-        free(v);
-        return NULL;
+        return mfree(v);
 }
 
 EFI_STATUS open_directory(
@@ -315,7 +313,7 @@ EFI_STATUS open_directory(
                 const char16_t *path,
                 EFI_FILE **ret) {
 
-        _cleanup_(file_closep) EFI_FILE *dir = NULL;
+        _cleanup_file_close_ EFI_FILE *dir = NULL;
         _cleanup_free_ EFI_FILE_INFO *file_info = NULL;
         EFI_STATUS err;
 

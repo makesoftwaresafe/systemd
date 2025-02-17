@@ -5,6 +5,7 @@
 #if WANT_LINUX_FS_H
 #include <linux/fs.h>
 #endif
+#include <linux/kcmp.h>
 #include <linux/magic.h>
 #include <sys/ioctl.h>
 #include <sys/resource.h>
@@ -1113,8 +1114,6 @@ int fds_are_same_mount(int fd1, int fd2) {
                 int mntid;
 
                 r = path_get_mnt_id_at_fallback(fd1, "", &mntid);
-                if (ERRNO_IS_NEG_NOT_SUPPORTED(r))
-                        return true; /* skip the mount ID check */
                 if (r < 0)
                         return r;
                 assert(mntid >= 0);
@@ -1127,8 +1126,6 @@ int fds_are_same_mount(int fd1, int fd2) {
                 int mntid;
 
                 r = path_get_mnt_id_at_fallback(fd2, "", &mntid);
-                if (ERRNO_IS_NEG_NOT_SUPPORTED(r))
-                        return true; /* skip the mount ID check */
                 if (r < 0)
                         return r;
                 assert(mntid >= 0);

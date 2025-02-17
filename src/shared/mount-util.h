@@ -79,6 +79,11 @@ int umount_verbose(
                 const char *where,
                 int flags);
 
+int umountat_detach_verbose(
+                int error_log_level,
+                int fd,
+                const char *where);
+
 int mount_option_mangle(
                 const char *options,
                 unsigned long mount_flags,
@@ -151,6 +156,9 @@ typedef enum RemountIdmapping {
          * to add inodes to file systems mapped this way should set this flag, but given it comes with
          * certain security implications defaults to off, and requires explicit opt-in. */
         REMOUNT_IDMAPPING_HOST_ROOT,
+        /* Much like REMOUNT_IDMAPPING_HOST_ROOT, but the source mapping is not from 0…65535 but from the
+         * foreign UID range. */
+        REMOUNT_IDMAPPING_FOREIGN_WITH_HOST_ROOT,
         /* Define a mapping from root user within the container to the owner of the bind mounted directory.
          * This ensures no root-owned files will be written in a bind-mounted directory owned by a different
          * user. No other users are mapped. */

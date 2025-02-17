@@ -136,7 +136,7 @@ if want_tests != 'false'
         test('udev-rules-check',
              exe,
              suite : 'udev',
-             args : ['verify', '--resolve-names=never', all_rules])
+             args : ['verify', '--resolve-names=late', all_rules])
 endif
 
 ############################################################
@@ -381,6 +381,7 @@ foreach dirname : [
         'TEST-84-STORAGETM',
         'TEST-85-NETWORK',
         'TEST-86-MULTI-PROFILE-UKI',
+        'TEST-87-AUX-UTILS-VM',
 ]
         subdir(dirname)
 endforeach

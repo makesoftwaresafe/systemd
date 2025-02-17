@@ -688,25 +688,6 @@ int machine_openpt(Machine *m, int flags, char **ret_peer) {
         }
 }
 
-int machine_open_terminal(Machine *m, const char *path, int mode) {
-        assert(m);
-
-        switch (m->class) {
-
-        case MACHINE_HOST:
-                return open_terminal(path, mode);
-
-        case MACHINE_CONTAINER:
-                if (!pidref_is_set(&m->leader))
-                        return -EINVAL;
-
-                return open_terminal_in_namespace(&m->leader, path, mode);
-
-        default:
-                return -EOPNOTSUPP;
-        }
-}
-
 static int machine_bus_new(Machine *m, sd_bus_error *error, sd_bus **ret) {
         int r;
 
@@ -805,13 +786,7 @@ int machine_start_shell(
         if (!p || !utmp_id)
                 return log_debug_errno(SYNTHETIC_ERRNO(EINVAL), "Path of pseudo TTY has unexpected prefix");
 
-        /* First try to get an fd for the PTY peer via the new racefree ioctl(), directly. Otherwise go via
-         * joining the namespace, because it goes by path */
-        pty_fd = pty_open_peer_racefree(ptmx_fd, O_RDWR|O_NOCTTY|O_CLOEXEC);
-        if (ERRNO_IS_NEG_NOT_SUPPORTED(pty_fd)) {
-                log_debug_errno(pty_fd, "Failed to get PTY peer via racefree ioctl() (ptmx_fd=%d). Trying via joining the namespace (ptmx_name=%s): %m", ptmx_fd, ptmx_name);
-                pty_fd = machine_open_terminal(m, ptmx_name, O_RDWR|O_NOCTTY|O_CLOEXEC);
-        }
+        pty_fd = pty_open_peer(ptmx_fd, O_RDWR|O_NOCTTY|O_CLOEXEC);
         if (pty_fd < 0)
                 return log_debug_errno(pty_fd, "Failed to open terminal: %m");
 
@@ -979,7 +954,7 @@ char** machine_default_shell_args(const char *user) {
         return TAKE_PTR(args);
 }
 
-int machine_copy_from_to(
+int machine_copy_from_to_operation(
                 Manager *manager,
                 Machine *machine,
                 const char *host_path,

@@ -37,21 +37,13 @@ ExecStart=false
 """
 
 
-def sandbox(args: argparse.Namespace) -> list[str]:
-    return [
-        args.mkosi,
-        '--directory', os.fspath(args.meson_source_dir),
-        '--extra-search-path', os.fspath(args.meson_build_dir),
-        'sandbox',
-    ]  # fmt: skip
-
-
 @dataclasses.dataclass(frozen=True)
 class Summary:
     distribution: str
     release: str
     architecture: str
     builddir: Path
+    buildsubdir: Path
     environment: dict[str, str]
 
     @classmethod
@@ -74,6 +66,7 @@ class Summary:
             release=j['Images'][-1]['Release'],
             architecture=j['Images'][-1]['Architecture'],
             builddir=Path(j['Images'][-1]['BuildDirectory']),
+            buildsubdir=Path(j['Images'][-1]['BuildSubdirectory']),
             environment=j['Images'][-1]['Environment'],
         )
 
@@ -87,7 +80,7 @@ def process_coredumps(args: argparse.Namespace, journal_file: Path) -> bool:
         exclude_regex = None
 
     result = subprocess.run(
-        sandbox(args) + [
+        [
             'coredumpctl',
             '--file', journal_file,
             '--json=short',
@@ -110,7 +103,7 @@ def process_coredumps(args: argparse.Namespace, journal_file: Path) -> bool:
         return False
 
     subprocess.run(
-        sandbox(args) + [
+        [
             'coredumpctl',
             '--file', journal_file,
             '--no-pager',
@@ -152,7 +145,7 @@ def process_sanitizer_report(args: argparse.Namespace, journal_file: Path) -> bo
     find_comm = re.compile(r'^\[[.0-9 ]+?\]\s(.*?:)\s')
 
     with subprocess.Popen(
-        sandbox(args) + [
+        [
             'journalctl',
             '--output', 'short-monotonic',
             '--no-hostname',
@@ -246,7 +239,7 @@ def process_sanitizer_report(args: argparse.Namespace, journal_file: Path) -> bo
 
 def process_coverage(args: argparse.Namespace, summary: Summary, name: str, journal_file: Path) -> None:
     coverage = subprocess.run(
-        sandbox(args) + [
+        [
             'journalctl',
             '--file', journal_file,
             '--field=COVERAGE_TAR',
@@ -266,7 +259,7 @@ def process_coverage(args: argparse.Namespace, summary: Summary, name: str, jour
 
         with tempfile.TemporaryDirectory(prefix='coverage-') as tmp:
             subprocess.run(
-                sandbox(args) + [
+                [
                     'tar',
                     '--extract',
                     '--file', '-',
@@ -288,7 +281,7 @@ def process_coverage(args: argparse.Namespace, summary: Summary, name: str, jour
                 p.rename(dst)
 
             subprocess.run(
-                sandbox(args) + [
+                [
                     'find',
                     tmp,
                     '-name', '*.gcda',
@@ -300,23 +293,21 @@ def process_coverage(args: argparse.Namespace, summary: Summary, name: str, jour
             )  # fmt: skip
 
             subprocess.run(
-                sandbox(args)
-                + [
+                [
                     'rsync',
                     '--archive',
                     '--prune-empty-dirs',
                     '--include=*/',
                     '--include=*.gcno',
                     '--exclude=*',
-                    f'{os.fspath(args.meson_build_dir / summary.builddir)}/',
+                    f'{os.fspath(summary.builddir / summary.buildsubdir)}/',
                     os.fspath(Path(tmp) / 'work/build'),
                 ],
                 check=True,
             )
 
             subprocess.run(
-                sandbox(args)
-                + [
+                [
                     'lcov',
                     *(
                         [
@@ -337,11 +328,11 @@ def process_coverage(args: argparse.Namespace, summary: Summary, name: str, jour
                     '--quiet',
                 ],
                 check=True,
+                cwd=os.fspath(args.meson_source_dir),
             )  # fmt: skip
 
             subprocess.run(
-                sandbox(args)
-                + [
+                [
                     'lcov',
                     '--ignore-errors', 'inconsistent,inconsistent,format,corrupt,empty',
                     '--add-tracefile', output if output.exists() else initial,
@@ -350,6 +341,7 @@ def process_coverage(args: argparse.Namespace, summary: Summary, name: str, jour
                     '--quiet',
                 ],
                 check=True,
+                cwd=os.fspath(args.meson_source_dir),
             )  # fmt: skip
 
             Path(f'{output}.new').unlink()
@@ -480,7 +472,7 @@ def main() -> None:
         '--output-dir', os.fspath(args.meson_build_dir / 'mkosi.output'),
         '--extra-search-path', os.fspath(args.meson_build_dir),
         '--machine', name,
-        '--ephemeral',
+        '--ephemeral=yes',
         *(['--forward-journal', journal_file] if journal_file else []),
         *(
             [

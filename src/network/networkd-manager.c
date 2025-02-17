@@ -230,9 +230,6 @@ static int manager_listen_fds(Manager *m, int *ret_rtnl_fd) {
         if (n < 0)
                 return n;
 
-        if (strv_length(names) != (size_t) n)
-                return -EINVAL;
-
         for (int i = 0; i < n; i++) {
                 int fd = i + SD_LISTEN_FDS_START;
 
@@ -695,7 +692,7 @@ Manager* manager_free(Manager *m) {
         m->wiphy_by_name = hashmap_free(m->wiphy_by_name);
         m->wiphy_by_index = hashmap_free_with_destructor(m->wiphy_by_index, wiphy_free);
 
-        ordered_set_free_free(m->address_pools);
+        ordered_set_free(m->address_pools);
 
         hashmap_free(m->route_table_names_by_number);
         hashmap_free(m->route_table_numbers_by_name);

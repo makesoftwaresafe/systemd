@@ -4,7 +4,7 @@ project('systemd', 'c',
         version : files('meson.version'),
         license : 'LGPLv2+',
         default_options: [
-                'c_std=gnu11',
+                'c_std=gnu17',
                 'prefix=/usr',
                 'sysconfdir=/etc',
                 'localstatedir=/var',
@@ -377,6 +377,7 @@ possible_common_cc_flags = [
         '-Warray-bounds=2',
         '-Wdate-time',
         '-Wendif-labels',
+        '-Werror=discarded-qualifiers',
         '-Werror=format=2',
         '-Werror=format-signedness',
         '-Werror=implicit-function-declaration',
@@ -412,6 +413,7 @@ possible_common_cc_flags = [
         '-Wunterminated-string-initialization',
         '-Wunused-function',
         '-Wwrite-strings',
+        '-Wzero-as-null-pointer-constant',
         '-Wzero-length-bounds',
 
         # negative arguments are correctly detected starting with meson 0.46.
@@ -515,9 +517,6 @@ add_project_link_arguments(
 userspace_c_args += cc.get_supported_arguments(possible_cc_flags)
 userspace_c_ld_args += cc.get_supported_link_arguments(possible_link_flags)
 
-have = cc.has_argument('-Wzero-length-bounds')
-conf.set10('HAVE_ZERO_LENGTH_BOUNDS', have)
-
 if cc.compiles('''
    #include <time.h>
    #include <inttypes.h>
@@ -537,14 +536,19 @@ endif
 
 cpp = ' '.join(cc.cmd_array() + get_option('c_args')) + ' -E'
 
-has_wstringop_truncation = cc.has_argument('-Wstringop-truncation')
+# new in GCC 10
+have = cc.has_argument('-Wzero-length-bounds')
+conf.set10('HAVE_WARNING_ZERO_LENGTH_BOUNDS', have)
+
+# new in GCC 15
+have = cc.has_argument('-Wzero-as-null-pointer-constant')
+conf.set10('HAVE_WARNING_ZERO_AS_NULL_POINTER_CONSTANT', have)
 
 #####################################################################
 # compilation result tests
 
 conf.set('_GNU_SOURCE', 1)
 conf.set('__SANE_USERSPACE_TYPES__', true)
-conf.set10('HAVE_WSTRINGOP_TRUNCATION', has_wstringop_truncation)
 
 conf.set('SIZEOF_DEV_T', cc.sizeof('dev_t', prefix : '#include <sys/types.h>'))
 conf.set('SIZEOF_INO_T', cc.sizeof('ino_t', prefix : '#include <sys/types.h>'))
@@ -621,7 +625,7 @@ foreach ident : [
                                  #include <unistd.h>'''],     # no known header declares pivot_root
         ['ioprio_get',        '''#include <sched.h>'''],      # no known header declares ioprio_get
         ['ioprio_set',        '''#include <sched.h>'''],      # no known header declares ioprio_set
-        ['sched_setattr',     '''#include <sched.h>'''],      # no known header declares sched_setattr
+        ['sched_setattr',     '''#include <sched.h>'''],
         ['name_to_handle_at', '''#include <sys/types.h>
                                  #include <sys/stat.h>
                                  #include <fcntl.h>'''],
@@ -677,6 +681,9 @@ foreach ident : [
         ['pidfd_spawn',       '''#include <spawn.h>'''],
         ['strerrorname_np',   '''#include <string.h>'''],
         ['getrandom',         '''#include <sys/random.h>'''],
+        ['quotactl_fd',       '''#include <sys/quota.h>'''],
+        ['setxattrat',        '''#include <sys/xattr.h>'''],  # no known header declares setxattrat
+        ['removexattrat',     '''#include <sys/xattr.h>'''],  # no known header declares removexattrat
 ]
 
         have = cc.has_function(ident[0], prefix : ident[1], args : '-D_GNU_SOURCE')
@@ -685,17 +692,20 @@ endforeach
 
 #####################################################################
 
-sh = find_program('sh')
-echo = find_program('echo')
-sed = find_program('sed')
 awk = find_program('awk')
-stat = find_program('stat')
-ln = find_program('ln')
-git = find_program('git', required : false)
-env = find_program('env')
-rsync = find_program('rsync', required : false)
 diff = find_program('diff')
+echo = find_program('echo')
+env = find_program('env')
 find = find_program('find')
+getent = find_program('getent', required : false)
+git = find_program('git', required : false)
+gperf = find_program('gperf')
+id = find_program('id', required : false)
+ln = find_program('ln')
+rsync = find_program('rsync', required : false)
+sed = find_program('sed')
+sh = find_program('sh')
+stat = find_program('stat')
 
 ln_s = ln.full_path() + ' -frsT -- "${DESTDIR:-}@0@" "${DESTDIR:-}@1@"'
 
@@ -733,8 +743,6 @@ endif
 
 #####################################################################
 
-gperf = find_program('gperf')
-
 gperf_test_format = '''
 #include <string.h>
 const char* in_word_set(const char *, @0@);
@@ -764,7 +772,6 @@ if not cc.has_header('sys/capability.h')
 endif
 foreach header : ['crypt.h',
                   'linux/ioprio.h',
-                  'linux/time_types.h',
                   'sys/sdt.h',
                   'threads.h',
                   'valgrind/memcheck.h',
@@ -884,41 +891,49 @@ nobody_user = get_option('nobody-user')
 nobody_group = get_option('nobody-group')
 
 if not meson.is_cross_build()
-        getent_result = run_command('getent', 'passwd', '65534', check : false)
-        if getent_result.returncode() == 0
-                name = getent_result.stdout().split(':')[0]
-                if name != nobody_user
-                        warning('\n' +
-                                'The local user with the UID 65534 does not match the configured user name "@0@" of the nobody user (its name is @1@).\n'.format(nobody_user, name) +
-                                'Your build will result in an user table setup that is incompatible with the local system.')
+        if getent.found()
+                ret = run_command(getent, 'passwd', '65534', check : false)
+                if ret.returncode() == 0
+                        name = ret.stdout().split(':')[0]
+                        if name != nobody_user
+                                warning('\n' +
+                                        'The local user with the UID 65534 does not match the configured user name "@0@" of the nobody user (its name is @1@).\n'.format(nobody_user, name) +
+                                        'Your build will result in an user table setup that is incompatible with the local system.')
+                        endif
                 endif
         endif
-        id_result = run_command('id', '-u', nobody_user, check : false)
-        if id_result.returncode() == 0
-                id = id_result.stdout().strip().to_int()
-                if id != 65534
-                        warning('\n' +
-                                'The local user with the configured user name "@0@" of the nobody user does not have UID 65534 (it has @1@).\n'.format(nobody_user, id) +
-                                'Your build will result in an user table setup that is incompatible with the local system.')
+        if id.found()
+                ret = run_command(id, '-u', nobody_user, check : false)
+                if ret.returncode() == 0
+                        uid = ret.stdout().strip().to_int()
+                        if uid != 65534
+                                warning('\n' +
+                                        'The local user with the configured user name "@0@" of the nobody user does not have UID 65534 (it has @1@).\n'.format(nobody_user, uid) +
+                                        'Your build will result in an user table setup that is incompatible with the local system.')
+                        endif
                 endif
         endif
 
-        getent_result = run_command('getent', 'group', '65534', check : false)
-        if getent_result.returncode() == 0
-                name = getent_result.stdout().split(':')[0]
-                if name != nobody_group
-                        warning('\n' +
-                                'The local group with the GID 65534 does not match the configured group name "@0@" of the nobody group (its name is @1@).\n'.format(nobody_group, name) +
-                                'Your build will result in an group table setup that is incompatible with the local system.')
+        if getent.found()
+                ret = run_command(getent, 'group', '65534', check : false)
+                if ret.returncode() == 0
+                        name = ret.stdout().split(':')[0]
+                        if name != nobody_group
+                                warning('\n' +
+                                        'The local group with the GID 65534 does not match the configured group name "@0@" of the nobody group (its name is @1@).\n'.format(nobody_group, name) +
+                                        'Your build will result in an group table setup that is incompatible with the local system.')
+                        endif
                 endif
         endif
-        id_result = run_command('id', '-g', nobody_group, check : false)
-        if id_result.returncode() == 0
-                id = id_result.stdout().strip().to_int()
-                if id != 65534
-                        warning('\n' +
-                                'The local group with the configured group name "@0@" of the nobody group does not have GID 65534 (it has @1@).\n'.format(nobody_group, id) +
-                                'Your build will result in an group table setup that is incompatible with the local system.')
+        if id.found()
+                ret = run_command(id, '-g', nobody_group, check : false)
+                if ret.returncode() == 0
+                        gid = ret.stdout().strip().to_int()
+                        if gid != 65534
+                                warning('\n' +
+                                        'The local group with the configured group name "@0@" of the nobody group does not have GID 65534 (it has @1@).\n'.format(nobody_group, gid) +
+                                        'Your build will result in an group table setup that is incompatible with the local system.')
+                        endif
                 endif
         endif
 endif
@@ -935,6 +950,7 @@ static_ugids = []
 foreach option : ['adm-gid',
                   'audio-gid',
                   'cdrom-gid',
+                  'clock-gid',
                   'dialout-gid',
                   'disk-gid',
                   'input-gid',
@@ -1756,7 +1772,7 @@ python_39 = python.language_version().version_compare('>=3.9')
 
 if conf.get('BPF_FRAMEWORK') == 1
         bpf_clang_flags = [
-                '-std=gnu11',
+                '-std=gnu17',
                 '-Wno-compare-distinct-pointer-types',
                 '-fno-stack-protector',
                 '-O2',
@@ -1767,7 +1783,7 @@ if conf.get('BPF_FRAMEWORK') == 1
         ]
 
         bpf_gcc_flags = [
-                '-std=gnu11',
+                '-std=gnu17',
                 '-fno-stack-protector',
                 '-fno-ssa-phiopt',
                 '-O2',
@@ -2951,6 +2967,16 @@ custom_target('installed-unit-files.txt',
               command : [meson_extract_unit_files, project_build_root])
 
 #####################################################################
+
+udev_targets = []
+foreach bin : udev_binaries
+        udev_targets += executables_by_name.get(bin, [])
+endforeach
+alias_target('udev', buildable_rules, udev_targets, udev_units)
+
+if conf.get('ENABLE_HWDB') == 1
+        alias_target('hwdb', auto_suspend_rules, executables_by_name.get('systemd-hwdb'), hwdb_units)
+endif
 
 alt_time_epoch = run_command('date', '-Is', '-u', '-d', '@@0@'.format(time_epoch),
                              check : true).stdout().strip()

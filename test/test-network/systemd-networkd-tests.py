@@ -1176,7 +1176,7 @@ class Utilities():
             self.fail(f'Timed out waiting for {link} to reach state {operstate}/{setup_state}')
         return False
 
-    def wait_online(self, *links_with_operstate, timeout='20s', bool_any=False, ipv4=False, ipv6=False, setup_state='configured', setup_timeout=5):
+    def wait_online(self, *links_with_operstate, timeout='20s', bool_any=False, ipv4=False, ipv6=False, setup_state='configured', setup_timeout=5, bool_dns=False):
         """Wait for the links to reach the specified operstate and/or setup state.
 
         This is similar to wait_operstate() but can be used for multiple links,
@@ -1190,6 +1190,8 @@ class Utilities():
         Set 'bool_any' to True to wait for any (instead of all) of the given links.
         If this is set, no setup_state checks are done.
 
+        Set 'bool_dns' to True to wait for DNS servers to be accessible.
+
         Set 'ipv4' or 'ipv6' to True to wait for IPv4 address or IPv6 address, respectively, of each of the given links.
         This is applied only for the operational state 'degraded' or above.
 
@@ -1202,6 +1204,8 @@ class Utilities():
         args = wait_online_cmd + [f'--timeout={timeout}'] + [f'--interface={link}' for link in links_with_operstate] + [f'--ignore={link}' for link in protected_links]
         if bool_any:
             args += ['--any']
+        if bool_dns:
+            args += ['--dns']
         if ipv4:
             args += ['--ipv4']
         if ipv6:
@@ -1613,6 +1617,124 @@ class WaitOnlineTests(unittest.TestCase, Utilities):
         self.wait_operstate('bridge99', '(off|no-carrier)', setup_state='configuring')
         self.wait_operstate('test1', 'degraded')
 
+    def do_test_wait_online_dns(
+        self,
+        global_dns='',
+        fallback_dns='',
+        expect_timeout=False,
+        network_dropin=None,
+    ):
+        global wait_online_env
+
+        if network_dropin is not None:
+            network_dropin_path = os.path.join(
+                network_unit_dir,
+                '25-dhcp-client-use-dns-ipv4.network.d/test.conf'
+            )
+            mkdir_p(os.path.dirname(network_dropin_path))
+            with open(network_dropin_path, 'w') as f:
+                f.write(network_dropin)
+
+        copy_network_unit(
+            '25-veth.netdev',
+            '25-dhcp-client-use-dns-ipv4.network',
+            '25-dhcp-server.network'
+        )
+        start_networkd()
+        self.wait_online('veth-peer:routable')
+
+        # Unless given, clear global DNS configuration
+        resolved_dropin = '/run/systemd/resolved.conf.d/global-dns.conf'
+        mkdir_p(os.path.dirname(resolved_dropin))
+        with open(resolved_dropin, 'w') as f:
+            f.write((
+                '[Resolve]\n'
+                f'DNS={global_dns}\n'
+                f'FallbackDNS={fallback_dns}\n'
+            ))
+        self.addCleanup(os.remove, resolved_dropin)
+        check_output('systemctl reload systemd-resolved')
+
+        try:
+            wait_online_env_copy = wait_online_env.copy()
+
+            wait_online_env['SYSTEMD_LOG_LEVEL'] = 'debug'
+            wait_online_env['SYSTEMD_LOG_TARGET'] = 'console'
+
+            self.wait_online('veth99:routable', bool_dns=True)
+
+            if expect_timeout:
+                # The above should have thrown an exception.
+                self.fail(
+                    'Expected systemd-networkd-wait-online to time out'
+                )
+
+        except subprocess.CalledProcessError as e:
+            if expect_timeout:
+                self.assertRegex(
+                    e.output,
+                    f'veth99: No link-specific DNS server is accessible',
+                    f'Missing expected log message:\n{e.output}'
+                )
+            else:
+                self.fail(
+                    f'Command timed out:\n{e.output}'
+                )
+        finally:
+            wait_online_env = wait_online_env_copy
+
+    def test_wait_online_dns(self):
+        ''' test systemd-networkd-wait-online with --dns '''
+        self.do_test_wait_online_dns()
+
+    def test_wait_online_dns_global(self):
+        '''
+        test systemd-networkd-wait-online with --dns, expect pass due to global DNS
+        '''
+
+        # Set UseDNS=no, and allow global DNS to be used.
+        self.do_test_wait_online_dns(
+            global_dns='192.168.5.1',
+            network_dropin=(
+                '[DHCPv4]\n'
+                'UseDNS=no\n'
+            )
+        )
+
+    def test_wait_online_dns_expect_timeout(self):
+        ''' test systemd-networkd-wait-online with --dns, and expect timeout '''
+
+        # Explicitly set DNSDefaultRoute=yes, and require link-specific DNS to be used.
+        self.do_test_wait_online_dns(
+            expect_timeout=True,
+            network_dropin=(
+                '[Network]\n'
+                'DNSDefaultRoute=yes\n'
+                '[DHCPv4]\n'
+                'UseDNS=no\n'
+            )
+        )
+
+    def test_wait_online_dns_expect_timeout_global(self):
+        '''
+        test systemd-networkd-wait-online with --dns, and expect timeout
+        despite global DNS
+        '''
+
+        # Configure Domains=~., and expect timeout despite global DNS servers
+        # being available.
+        self.do_test_wait_online_dns(
+            expect_timeout=True,
+            global_dns='192.168.5.1',
+            network_dropin=(
+                '[Network]\n'
+                'Domains=~.\n'
+                '[DHCPv4]\n'
+                'UseDNS=no\n'
+            )
+        )
+
+
 class NetworkdNetDevTests(unittest.TestCase, Utilities):
 
     def setUp(self):
@@ -1682,6 +1804,7 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
         self.assertEqual(1,         int(read_link_attr('bridge99', 'bridge', 'multicast_snooping')))
         self.assertEqual(1,         int(read_link_attr('bridge99', 'bridge', 'stp_state')))
         self.assertEqual(3,         int(read_link_attr('bridge99', 'bridge', 'multicast_igmp_version')))
+        self.assertEqual(1,         int(read_link_attr('bridge99', 'bridge', 'no_linklocal_learn')))
 
         output = networkctl_status('bridge99')
         print(output)
@@ -3724,6 +3847,22 @@ class NetworkdNetworkTests(unittest.TestCase, Utilities):
         print(output)
         self.assertIn('104:	from 10.1.0.0/16 iif test1 lookup 12 nop', output)
 
+        output = check_output('ip rule list to 192.0.2.0/26')
+        print(output)
+        self.assertIn('to 192.0.2.0/26 lookup 1001', output)
+
+        output = check_output('ip rule list to 192.0.2.64/26')
+        print(output)
+        self.assertIn('to 192.0.2.64/26 lookup 1001', output)
+
+        output = check_output('ip rule list to 192.0.2.128/26')
+        print(output)
+        self.assertIn('to 192.0.2.128/26 lookup 1001', output)
+
+        output = check_output('ip rule list to 192.0.2.192/26')
+        print(output)
+        self.assertIn('to 192.0.2.192/26 lookup 1001', output)
+
     def check_routing_policy_rule_dummy98(self):
         print('### Checking routing policy rules requested by dummy98')
 
@@ -3859,6 +3998,45 @@ class NetworkdNetworkTests(unittest.TestCase, Utilities):
         output = check_output('ip -6 rule list table 1011')
         print(output)
         self.assertIn('10113:	from all iif test1 lookup 1011', output)
+
+    def test_routing_policy_rule_manual(self):
+        # For issue #36244.
+        copy_network_unit(
+            '11-dummy.netdev',
+            '25-routing-policy-rule-manual.network')
+        start_networkd()
+        self.wait_operstate('test1', operstate='off', setup_state='configuring', setup_timeout=20)
+
+        check_output('ip link add test2 type dummy')
+        self.wait_operstate('test2', operstate='off', setup_state='configuring', setup_timeout=20)
+
+        networkctl('up', 'test2')
+        self.wait_online('test2:degraded')
+
+        # The request for the routing policy rules are bound to test1. Hence, we need to wait for the rules
+        # being configured explicitly.
+        for _ in range(20):
+            time.sleep(0.5)
+
+            output = check_output('ip -4 rule list table 51819')
+            if output != '10:	from all lookup 51819 suppress_prefixlength 0 proto static':
+                continue
+
+            output = check_output('ip -6 rule list table 51819')
+            if output != '10:	from all lookup 51819 suppress_prefixlength 0 proto static':
+                continue
+
+            output = check_output('ip -4 rule list table 51820')
+            if output != '11:	not from all fwmark 0x38f lookup 51820 proto static':
+                continue
+
+            output = check_output('ip -6 rule list table 51820')
+            if output != '11:	not from all fwmark 0x38f lookup 51820 proto static':
+                continue
+
+            break
+        else:
+            self.assertFalse(True)
 
     @expectedFailureIfRoutingPolicyPortRangeIsNotAvailable()
     def test_routing_policy_rule_port_range(self):
@@ -5789,6 +5967,9 @@ class NetworkdBridgeTests(unittest.TestCase, Utilities):
         output = check_output('bridge -d link show test1')
         print(output)
         self.check_bridge_port_attr('bridge99', 'test1', 'priority',               '0')
+        self.assertIn('locked on', output)
+        if ' mab ' in output: # This is new in kernel and iproute2 v6.2
+            self.assertIn('mab on', output)
 
     def test_bridge_property(self):
         copy_network_unit('11-dummy.netdev', '12-dummy.netdev', '26-bridge.netdev',
@@ -6494,6 +6675,22 @@ class NetworkdRATests(unittest.TestCase, Utilities):
         networkctl_reload()
         self.check_router_preference('01', 100, 'high', 300, 'low')
 
+        # Use route options with preference to configure default routes.
+        with open(os.path.join(network_unit_dir, '25-veth-router-high.network'), mode='a', encoding='utf-8') as f:
+            f.write('LifetimeSec=1200\nPreference=low\n')
+        with open(os.path.join(network_unit_dir, '25-veth-router-low.network'), mode='a', encoding='utf-8') as f:
+            f.write('LifetimeSec=1200\nPreference=high\n')
+        networkctl_reload()
+        self.check_router_preference('01', 300, 'low', 100, 'high')
+
+        # Set zero lifetime again to the route options.
+        with open(os.path.join(network_unit_dir, '25-veth-router-high.network'), mode='a', encoding='utf-8') as f:
+            f.write('LifetimeSec=0\n')
+        with open(os.path.join(network_unit_dir, '25-veth-router-low.network'), mode='a', encoding='utf-8') as f:
+            f.write('LifetimeSec=0\n')
+        networkctl_reload()
+        self.check_router_preference('01', 100, 'high', 300, 'low')
+
     def _test_ndisc_vs_static_route(self, manage_foreign_nexthops):
         if not manage_foreign_nexthops:
             copy_networkd_conf_dropin('networkd-manage-foreign-nexthops-no.conf')
@@ -7105,7 +7302,14 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         self.assertRegex(output, f'192.168.5.1 proto dhcp scope link src {address1} metric 24')
         self.assertRegex(output, f'192.168.5.6 proto dhcp scope link src {address1} metric 24')
         self.assertRegex(output, f'192.168.5.7 proto dhcp scope link src {address1} metric 24')
-        self.assertIn('10.0.0.0/8 via 192.168.5.1 proto dhcp', output)
+        self.assertRegex(output, f'192.0.2.0/24 via 192.168.5.1 proto dhcp src {address1}')
+
+        print('## ip route show table 212 dev veth99')
+        output = check_output('ip route show table 212 dev veth99')
+        print(output)
+        self.assertRegex(output, f'192.168.5.0/24 proto dhcp scope link src {address1} metric 24')
+        self.assertRegex(output, f'192.168.5.1 proto dhcp scope link src {address1} metric 24')
+        self.assertRegex(output, f'198.51.100.0/24 via 192.168.5.1 proto dhcp src {address1}')
 
         print('## link state file')
         output = read_link_state_file('veth99')
@@ -7205,7 +7409,14 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         self.assertNotIn('192.168.5.6', output)
         self.assertRegex(output, f'192.168.5.7 proto dhcp scope link src {address2} metric 24')
         self.assertRegex(output, f'192.168.5.8 proto dhcp scope link src {address2} metric 24')
-        self.assertIn('10.0.0.0/8 via 192.168.5.1 proto dhcp', output)
+        self.assertRegex(output, f'192.0.2.0/24 via 192.168.5.1 proto dhcp src {address2}')
+
+        print('## ip route show table 212 dev veth99')
+        output = check_output('ip route show table 212 dev veth99')
+        print(output)
+        self.assertRegex(output, f'192.168.5.0/24 proto dhcp scope link src {address2} metric 24')
+        self.assertRegex(output, f'192.168.5.1 proto dhcp scope link src {address2} metric 24')
+        self.assertRegex(output, f'198.51.100.0/24 via 192.168.5.1 proto dhcp src {address2}')
 
         print('## link state file')
         output = read_link_state_file('veth99')
@@ -7273,6 +7484,11 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
 
         print('## ip route show table 211 dev veth99')
         output = check_output('ip route show table 211 dev veth99')
+        print(output)
+        self.assertNotIn(f'{address2}', output)
+
+        print('## ip route show table 212 dev veth99')
+        output = check_output('ip route show table 212 dev veth99')
         print(output)
         self.assertNotIn(f'{address2}', output)
 

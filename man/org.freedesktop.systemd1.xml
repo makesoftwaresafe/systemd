@@ -4838,9 +4838,10 @@ node /org/freedesktop/systemd1/unit/avahi_2ddaemon_2eservice {
       code. <literal>signal</literal> indicates that a service process exited with an uncaught
       signal. <literal>core-dump</literal> indicates that a service process exited uncleanly and dumped
       core. <literal>watchdog</literal> indicates that a service did not send out watchdog ping messages
-      often enough. <literal>start-limit</literal> indicates that a service has been started too frequently
-      in a specific time frame (as configured in <varname>StartLimitInterval</varname>,
-      <varname>StartLimitBurst</varname>).</para>
+      often enough. <literal>start-limit-hit</literal> indicates that a service has been started too
+      frequently in a specific time frame (as configured in <varname>StartLimitInterval</varname>,
+      <varname>StartLimitBurst</varname>). <literal>oom-kill</literal> indicates that a service was
+      terminated due to an out-of-memory (OOM) situation.</para>
 
       <para><varname>ControlGroup</varname> indicates the control group path the processes of this service
       unit are placed in.</para>
@@ -7047,6 +7048,8 @@ node /org/freedesktop/systemd1/unit/home_2emount {
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly b ReadWriteOnly = ...;
       readonly s Result = '...';
+      readonly s ReloadResult = '...';
+      readonly s CleanResult = '...';
       readonly u UID = ...;
       readonly u GID = ...;
       @org.freedesktop.DBus.Property.EmitsChangedSignal("invalidates")
@@ -7649,6 +7652,10 @@ node /org/freedesktop/systemd1/unit/home_2emount {
 
     <!--property ReadWriteOnly is not documented!-->
 
+    <!--property ReloadResult is not documented!-->
+
+    <!--property CleanResult is not documented!-->
+
     <!--property UID is not documented!-->
 
     <!--property GID is not documented!-->
@@ -8194,6 +8201,10 @@ node /org/freedesktop/systemd1/unit/home_2emount {
     <variablelist class="dbus-property" generated="True" extra-ref="ReadWriteOnly"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="Result"/>
+
+    <variablelist class="dbus-property" generated="True" extra-ref="ReloadResult"/>
+
+    <variablelist class="dbus-property" generated="True" extra-ref="CleanResult"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="UID"/>
 
@@ -12454,7 +12465,10 @@ $ gdbus introspect --system --dest org.freedesktop.systemd1 \
       <varname>ManagedOOMMemoryPressureDurationUSec</varname>,
       <varname>ProtectControlGroupsEx</varname>, and
       <varname>PrivatePIDs</varname> were added in version 257.</para>
-      <para><varname>ProtectHostnameEx</varname> and <function>RemoveSubgroup()</function> was added in version 258.</para>
+      <para><varname>ProtectHostnameEx</varname>,
+      <function>RemoveSubgroup()</function>,
+      <varname>ReloadResult</varname>, and
+      <varname>CleanResult</varname> were added in version 258.</para>
     </refsect2>
     <refsect2>
       <title>Swap Unit Objects</title>

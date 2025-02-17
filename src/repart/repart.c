@@ -2487,14 +2487,6 @@ static int partition_read_definition(Partition *p, const char *path, const char 
                 return log_syntax(NULL, LOG_ERR, path, 1, SYNTHETIC_ERRNO(EINVAL),
                                   "Encrypting verity hash/data partitions is not supported.");
 
-        if (p->verity == VERITY_SIG && !arg_private_key)
-                return log_syntax(NULL, LOG_ERR, path, 1, SYNTHETIC_ERRNO(EINVAL),
-                                  "Verity signature partition requested but no private key provided (--private-key=).");
-
-        if (p->verity == VERITY_SIG && !arg_certificate)
-                return log_syntax(NULL, LOG_ERR, path, 1, SYNTHETIC_ERRNO(EINVAL),
-                                  "Verity signature partition requested but no PEM certificate provided (--certificate=).");
-
         if (p->verity == VERITY_SIG && (p->size_min != UINT64_MAX || p->size_max != UINT64_MAX))
                 return log_syntax(NULL, LOG_ERR, path, 1, SYNTHETIC_ERRNO(EINVAL),
                                   "SizeMinBytes=/SizeMaxBytes= cannot be used with Verity=%s.",
@@ -4327,7 +4319,7 @@ static int prepare_temporary_file(Context *context, PartitionTarget *t, uint64_t
 
         r = read_attr_fd(fdisk_get_devfd(context->fdisk_context), &attrs);
         if (r < 0 && !ERRNO_IS_NEG_NOT_SUPPORTED(r))
-                return log_error_errno(r, "Failed to read file attributes of %s: %m", arg_node);
+                log_warning_errno(r, "Failed to read file attributes of %s, ignoring: %m", arg_node);
 
         if (FLAGS_SET(attrs, FS_NOCOW_FL)) {
                 r = chattr_fd(fd, FS_NOCOW_FL, FS_NOCOW_FL, NULL);
@@ -4596,6 +4588,12 @@ static int partition_encrypt(Context *context, Partition *p, PartitionTarget *ta
                 ssize_t base64_encoded_size;
                 int keyslot;
                 TPM2Flags flags = 0;
+
+                if (arg_tpm2_n_hash_pcr_values == 0 &&
+                    arg_tpm2_public_key_pcr_mask == 0 &&
+                    !arg_tpm2_pcrlock)
+                        log_notice("Notice: encrypting future partition %" PRIu64 ", locking against TPM2 with an empty policy, i.e. without any state or access restrictions.\n"
+                                   "Use --tpm2-public-key=, --tpm2-pcrlock=, or --tpm2-pcrs= to enable one or more restrictions.", p->partno);
 
                 if (arg_tpm2_public_key_pcr_mask != 0) {
                         r = tpm2_load_pcr_public_key(arg_tpm2_public_key, &pubkey.iov_base, &pubkey.iov_len);
@@ -5055,6 +5053,14 @@ static int partition_format_verity_sig(Context *context, Partition *p) {
 
         if (PARTITION_EXISTS(p))
                 return 0;
+
+        if (!context->private_key)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Verity signature partition signing requested but no private key provided (--private-key=).");
+
+        if (!context->certificate)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Verity signature partition signing requested but no PEM certificate provided (--certificate=).");
 
         (void) partition_hint(p, context->node, &hint);
 
@@ -6631,7 +6637,7 @@ static int context_split(Context *context) {
 
                         r = read_attr_fd(fd, &attrs);
                         if (r < 0 && !ERRNO_IS_NEG_NOT_SUPPORTED(r))
-                                return log_error_errno(r, "Failed to read file attributes of %s: %m", arg_node);
+                                log_warning_errno(r, "Failed to read file attributes of %s, ignoring: %m", arg_node);
                 }
 
                 fdt = xopenat_full(
@@ -7501,7 +7507,7 @@ static int context_minimize(Context *context) {
 
         r = read_attr_fd(context->backing_fd, &attrs);
         if (r < 0 && !ERRNO_IS_NEG_NOT_SUPPORTED(r))
-                return log_error_errno(r, "Failed to read file attributes of %s: %m", arg_node);
+                log_warning_errno(r, "Failed to read file attributes of %s, ignoring: %m", arg_node);
 
         LIST_FOREACH(partitions, p, context->partitions) {
                 _cleanup_(rm_rf_physical_and_freep) char *root = NULL;
@@ -8012,7 +8018,7 @@ static int parse_argv(int argc, char *argv[], X509 **ret_certificate, EVP_PKEY *
         _cleanup_(X509_freep) X509 *certificate = NULL;
         _cleanup_(openssl_ask_password_ui_freep) OpenSSLAskPasswordUI *ui = NULL;
         _cleanup_(EVP_PKEY_freep) EVP_PKEY *private_key = NULL;
-        bool auto_hash_pcr_values = true, auto_public_key_pcr_mask = true, auto_pcrlock = true;
+        bool auto_public_key_pcr_mask = true, auto_pcrlock = true;
         int c, r;
 
         assert(argc >= 0);
@@ -8241,7 +8247,6 @@ static int parse_argv(int argc, char *argv[], X509 **ret_certificate, EVP_PKEY *
                         break;
 
                 case ARG_TPM2_PCRS:
-                        auto_hash_pcr_values = false;
                         r = tpm2_parse_pcr_argument_append(optarg, &arg_tpm2_hash_pcr_values, &arg_tpm2_n_hash_pcr_values);
                         if (r < 0)
                                 return r;
@@ -8515,17 +8520,6 @@ static int parse_argv(int argc, char *argv[], X509 **ret_certificate, EVP_PKEY *
         if (auto_public_key_pcr_mask) {
                 assert(arg_tpm2_public_key_pcr_mask == 0);
                 arg_tpm2_public_key_pcr_mask = INDEX_TO_MASK(uint32_t, TPM2_PCR_KERNEL_BOOT);
-        }
-
-        if (auto_hash_pcr_values && !arg_tpm2_pcrlock) { /* Only lock to PCR 7 if no pcr policy is specified. */
-                assert(arg_tpm2_n_hash_pcr_values == 0);
-
-                if (!GREEDY_REALLOC_APPEND(
-                                    arg_tpm2_hash_pcr_values,
-                                    arg_tpm2_n_hash_pcr_values,
-                                    &TPM2_PCR_VALUE_MAKE(TPM2_PCR_INDEX_DEFAULT, /* hash= */ 0, /* value= */ {}),
-                                    1))
-                        return log_oom();
         }
 
         if (arg_pretty < 0 && isatty_safe(STDOUT_FILENO))

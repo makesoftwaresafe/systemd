@@ -1120,7 +1120,7 @@ int getenv_for_pid(pid_t pid, const char *field, char **ret) {
         return 0;
 }
 
-int pidref_is_my_child(const PidRef *pid) {
+int pidref_is_my_child(PidRef *pid) {
         int r;
 
         if (!pidref_is_set(pid))
@@ -1150,7 +1150,7 @@ int pid_is_my_child(pid_t pid) {
         return pidref_is_my_child(&PIDREF_MAKE_FROM_PID(pid));
 }
 
-int pidref_is_unwaited(const PidRef *pid) {
+int pidref_is_unwaited(PidRef *pid) {
         int r;
 
         /* Checks whether a PID is still valid at all, including a zombie */
@@ -1228,18 +1228,53 @@ int pidref_is_alive(const PidRef *pidref) {
         return result;
 }
 
-int pid_from_same_root_fs(pid_t pid) {
-        const char *root;
+int pidref_from_same_root_fs(PidRef *a, PidRef *b) {
+        _cleanup_(pidref_done) PidRef self = PIDREF_NULL;
+        int r;
 
-        if (pid < 0)
+        /* Checks if the two specified processes have the same root fs. Either can be specified as NULL in
+         * which case we'll check against ourselves. */
+
+        if (!a || !b) {
+                r = pidref_set_self(&self);
+                if (r < 0)
+                        return r;
+                if (!a)
+                        a = &self;
+                if (!b)
+                        b = &self;
+        }
+
+        if (!pidref_is_set(a) || !pidref_is_set(b))
+                return -ESRCH;
+
+        /* If one of the two processes have the same root they cannot have the same root fs, but if both of
+         * them do we don't know */
+        if (pidref_is_remote(a) && pidref_is_remote(b))
+                return -EREMOTE;
+        if (pidref_is_remote(a) || pidref_is_remote(b))
                 return false;
 
-        if (pid == 0 || pid == getpid_cached())
+        if (pidref_equal(a, b))
                 return true;
 
-        root = procfs_file_alloca(pid, "root");
+        const char *roota = procfs_file_alloca(a->pid, "root");
+        const char *rootb = procfs_file_alloca(b->pid, "root");
 
-        return inode_same(root, "/proc/1/root", 0);
+        int result = inode_same(roota, rootb, 0);
+        if (result == -ENOENT)
+                return proc_mounted() == 0 ? -ENOSYS : -ESRCH;
+        if (result < 0)
+                return result;
+
+        r = pidref_verify(a);
+        if (r < 0)
+                return r;
+        r = pidref_verify(b);
+        if (r < 0)
+                return r;
+
+        return result;
 }
 
 bool is_main_thread(void) {
@@ -1542,9 +1577,6 @@ int safe_fork_full(
         }
 
         if (FLAGS_SET(flags, FORK_DETACH)) {
-                assert(!FLAGS_SET(flags, FORK_WAIT));
-                assert(!ret_pid);
-
                 /* Fork off intermediary child if needed */
 
                 r = is_reaper_process();
@@ -1766,6 +1798,9 @@ int safe_fork_full(
                 }
         }
 
+        if (FLAGS_SET(flags, FORK_FREEZE))
+                freeze();
+
         if (ret_pid)
                 *ret_pid = getpid_cached();
 
@@ -1962,7 +1997,8 @@ _noreturn_ void freeze(void) {
                         break;
         }
 
-        /* waitid() failed with an unexpected error, things are really borked. Freeze now! */
+        /* waitid() failed with an ECHLD error (because there are no left-over child processes) or any other
+         * (unexpected) error. Freeze for good now! */
         for (;;)
                 pause();
 }
@@ -2045,7 +2081,7 @@ int posix_spawn_wrapper(
          * issues.
          *
          * Also, move the newly-created process into 'cgroup' through POSIX_SPAWN_SETCGROUP (clone3())
-         * if available. Note that CLONE_INTO_CGROUP is only supported on cgroup v2.
+         * if available.
          * returns 1: We're already in the right cgroup
          *         0: 'cgroup' not specified or POSIX_SPAWN_SETCGROUP is not supported. The caller
          *            needs to call 'cg_attach' on their own */
@@ -2064,14 +2100,10 @@ int posix_spawn_wrapper(
         _unused_ _cleanup_(posix_spawnattr_destroyp) posix_spawnattr_t *attr_destructor = &attr;
 
 #if HAVE_PIDFD_SPAWN
-        static enum {
-                CLONE_ONLY_PID,
-                CLONE_CAN_PIDFD,  /* 5.2 */
-                CLONE_CAN_CGROUP, /* 5.7 */
-        } clone_support = CLONE_CAN_CGROUP;
+        static bool have_clone_into_cgroup = true; /* kernel 5.7+ */
         _cleanup_close_ int cgroup_fd = -EBADF;
 
-        if (cgroup && clone_support >= CLONE_CAN_CGROUP) {
+        if (cgroup && have_clone_into_cgroup) {
                 _cleanup_free_ char *resolved_cgroup = NULL;
 
                 r = cg_get_path_and_check(
@@ -2102,47 +2134,41 @@ int posix_spawn_wrapper(
                 return -r;
 
 #if HAVE_PIDFD_SPAWN
-        if (clone_support >= CLONE_CAN_PIDFD) {
-                _cleanup_close_ int pidfd = -EBADF;
+        _cleanup_close_ int pidfd = -EBADF;
 
-                r = pidfd_spawn(&pidfd, path, NULL, &attr, argv, envp);
-                if (ERRNO_IS_NOT_SUPPORTED(r) && FLAGS_SET(flags, POSIX_SPAWN_SETCGROUP) &&
-                    cg_is_threaded(cgroup) > 0) /* clone3() could also return EOPNOTSUPP if the target cgroup is in threaded mode. */
-                        return -EUCLEAN;
-                if ((ERRNO_IS_NOT_SUPPORTED(r) || ERRNO_IS_PRIVILEGE(r) || r == E2BIG) &&
-                    FLAGS_SET(flags, POSIX_SPAWN_SETCGROUP)) {
-                        /* Compiled on a newer host, or seccomp&friends blocking clone3()? Fallback, but
-                         * need to disable POSIX_SPAWN_SETCGROUP, which is what redirects to clone3().
-                         * Note that we might get E2BIG here since some kernels (e.g. 5.4) support clone3()
-                         * but not CLONE_INTO_CGROUP. */
+        r = pidfd_spawn(&pidfd, path, NULL, &attr, argv, envp);
+        if (ERRNO_IS_NOT_SUPPORTED(r) && FLAGS_SET(flags, POSIX_SPAWN_SETCGROUP) && cg_is_threaded(cgroup) > 0)
+                return -EUCLEAN; /* clone3() could also return EOPNOTSUPP if the target cgroup is in threaded mode,
+                                    turn that into something recognizable */
+        if ((ERRNO_IS_NOT_SUPPORTED(r) || ERRNO_IS_PRIVILEGE(r) || r == E2BIG) &&
+            FLAGS_SET(flags, POSIX_SPAWN_SETCGROUP)) {
+                /* Compiled on a newer host, or seccomp&friends blocking clone3()? Fallback, but
+                 * need to disable POSIX_SPAWN_SETCGROUP, which is what redirects to clone3().
+                 * Note that we might get E2BIG here since some kernels (e.g. 5.4) support clone3()
+                 * but not CLONE_INTO_CGROUP. */
 
-                        /* CLONE_INTO_CGROUP definitely won't work, hence remember the fact so that we don't
-                         * retry every time. */
-                        assert(clone_support >= CLONE_CAN_CGROUP);
-                        clone_support = CLONE_CAN_PIDFD;
+                /* CLONE_INTO_CGROUP definitely won't work, hence remember the fact so that we don't
+                 * retry every time. */
+                have_clone_into_cgroup = false;
 
-                        flags &= ~POSIX_SPAWN_SETCGROUP;
-                        r = posix_spawnattr_setflags(&attr, flags);
-                        if (r != 0)
-                                return -r;
-
-                        r = pidfd_spawn(&pidfd, path, NULL, &attr, argv, envp);
-                }
-                if (r == 0) {
-                        r = pidref_set_pidfd_consume(ret_pidref, TAKE_FD(pidfd));
-                        if (r < 0)
-                                return r;
-
-                        return FLAGS_SET(flags, POSIX_SPAWN_SETCGROUP);
-                }
-                if (!ERRNO_IS_NOT_SUPPORTED(r) && !ERRNO_IS_PRIVILEGE(r))
+                flags &= ~POSIX_SPAWN_SETCGROUP;
+                r = posix_spawnattr_setflags(&attr, flags);
+                if (r != 0)
                         return -r;
 
-                clone_support = CLONE_ONLY_PID; /* No CLONE_PIDFD either? */
+                r = pidfd_spawn(&pidfd, path, NULL, &attr, argv, envp);
         }
-#endif
+        if (r != 0)
+                return -r;
 
+        r = pidref_set_pidfd_consume(ret_pidref, TAKE_FD(pidfd));
+        if (r < 0)
+                return r;
+
+        return FLAGS_SET(flags, POSIX_SPAWN_SETCGROUP);
+#else
         pid_t pid;
+
         r = posix_spawn(&pid, path, NULL, &attr, argv, envp);
         if (r != 0)
                 return -r;
@@ -2152,6 +2178,7 @@ int posix_spawn_wrapper(
                 return r;
 
         return 0; /* We did not use CLONE_INTO_CGROUP so return 0, the caller will have to move the child */
+#endif
 }
 
 int proc_dir_open(DIR **ret) {
@@ -2263,9 +2290,8 @@ int read_errno(int errno_fd) {
 
         assert(errno_fd >= 0);
 
-        /* The issue here is that it's impossible to distinguish between
-         * an error code returned by child and IO error arrised when reading it.
-         * So, the function logs errors and return EIO for the later case. */
+        /* The issue here is that it's impossible to distinguish between an error code returned by child and
+         * IO error arose when reading it. So, the function logs errors and return EIO for the later case. */
 
         ssize_t n = loop_read(errno_fd, &r, sizeof(r), /* do_poll = */ false);
         if (n < 0) {

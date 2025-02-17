@@ -5,6 +5,7 @@
 #include "sd-bus.h"
 
 #include "ask-password-api.h"
+#include "bitfield.h"
 #include "build.h"
 #include "bus-common-errors.h"
 #include "bus-error.h"
@@ -750,17 +751,9 @@ static int inspect_home(int argc, char *argv[], void *userdata) {
                 uid_t uid;
 
                 r = parse_uid(*i, &uid);
-                if (r < 0) {
-                        if (!valid_user_group_name(*i, 0)) {
-                                log_error("Invalid user name '%s'.", *i);
-                                if (ret == 0)
-                                        ret = -EINVAL;
-
-                                continue;
-                        }
-
+                if (r < 0)
                         r = bus_call_method(bus, bus_mgr, "GetUserRecordByName", &error, &reply, "s", *i);
-                } else
+                else
                         r = bus_call_method(bus, bus_mgr, "GetUserRecordByUID", &error, &reply, "u", (uint32_t) uid);
                 if (r < 0) {
                         log_error_errno(r, "Failed to inspect home: %s", bus_error_message(&error, r));
@@ -2411,36 +2404,35 @@ static int create_from_credentials(void) {
 
 static int has_regular_user(void) {
         _cleanup_(userdb_iterator_freep) UserDBIterator *iterator = NULL;
+        UserDBMatch match = USERDB_MATCH_NULL;
         int r;
 
-        r = userdb_all(USERDB_SUPPRESS_SHADOW, &iterator);
+        match.disposition_mask = INDEX_TO_MASK(uint64_t, USER_REGULAR);
+
+        r = userdb_all(&match, USERDB_SUPPRESS_SHADOW, &iterator);
         if (r < 0)
                 return log_error_errno(r, "Failed to create user enumerator: %m");
 
-        for (;;) {
-                _cleanup_(user_record_unrefp) UserRecord *ur = NULL;
+        r = userdb_iterator_get(iterator, &match, /* ret= */ NULL);
+        if (r == -ESRCH)
+                return false;
+        if (r < 0)
+                return log_error_errno(r, "Failed to enumerate users: %m");
 
-                r = userdb_iterator_get(iterator, &ur);
-                if (r == -ESRCH)
-                        break;
-                if (r < 0)
-                        return log_error_errno(r, "Failed to enumerate users: %m");
-
-                if (user_record_disposition(ur) == USER_REGULAR)
-                        return true;
-        }
-
-        return false;
+        return true;
 }
 
 static int acquire_group_list(char ***ret) {
         _cleanup_(userdb_iterator_freep) UserDBIterator *iterator = NULL;
         _cleanup_strv_free_ char **groups = NULL;
+        UserDBMatch match = USERDB_MATCH_NULL;
         int r;
 
         assert(ret);
 
-        r = groupdb_all(USERDB_SUPPRESS_SHADOW|USERDB_EXCLUDE_DYNAMIC_USER, &iterator);
+        match.disposition_mask = INDEXES_TO_MASK(uint64_t, USER_REGULAR, USER_SYSTEM);
+
+        r = groupdb_all(&match, USERDB_SUPPRESS_SHADOW, &iterator);
         if (r == -ENOLINK)
                 log_debug_errno(r, "No groups found. (Didn't check via Varlink.)");
         else if (r == -ESRCH)
@@ -2451,25 +2443,25 @@ static int acquire_group_list(char ***ret) {
                 for (;;) {
                         _cleanup_(group_record_unrefp) GroupRecord *gr = NULL;
 
-                        r = groupdb_iterator_get(iterator, &gr);
+                        r = groupdb_iterator_get(iterator, &match, &gr);
                         if (r == -ESRCH)
                                 break;
                         if (r < 0)
                                 return log_debug_errno(r, "Failed acquire next group: %m");
-
-                        if (!IN_SET(group_record_disposition(gr), USER_REGULAR, USER_SYSTEM))
-                                continue;
 
                         if (group_record_disposition(gr) == USER_REGULAR) {
                                 _cleanup_(user_record_unrefp) UserRecord *ur = NULL;
 
                                 /* Filter groups here that belong to a specific user, and are named like them */
 
-                                r = userdb_by_name(gr->group_name, USERDB_SUPPRESS_SHADOW|USERDB_EXCLUDE_DYNAMIC_USER, &ur);
+                                UserDBMatch user_match = USERDB_MATCH_NULL;
+                                user_match.disposition_mask = INDEX_TO_MASK(uint64_t, USER_REGULAR);
+
+                                r = userdb_by_name(gr->group_name, &user_match, USERDB_SUPPRESS_SHADOW, &ur);
                                 if (r < 0 && r != -ESRCH)
                                         return log_debug_errno(r, "Failed to check if matching user exists for group '%s': %m", gr->group_name);
 
-                                if (r >= 0 && ur->gid == gr->gid && user_record_disposition(ur) == USER_REGULAR)
+                                if (r >= 0 && ur->gid == gr->gid)
                                         continue;
                         }
 
@@ -2484,6 +2476,28 @@ static int acquire_group_list(char ***ret) {
         return !!*ret;
 }
 
+static int group_completion_callback(const char *key, char ***ret_list, void *userdata) {
+        char ***available = userdata;
+        int r;
+
+        if (!*available) {
+                r = acquire_group_list(available);
+                if (r < 0)
+                        log_debug_errno(r, "Failed to enumerate available groups, ignoring: %m");
+        }
+
+        _cleanup_strv_free_ char **l = strv_copy(*available);
+        if (!l)
+                return -ENOMEM;
+
+        r = strv_extend(&l, "list");
+        if (r < 0)
+                return r;
+
+        *ret_list = TAKE_PTR(l);
+        return 0;
+}
+
 static int create_interactively(void) {
         _cleanup_free_ char *username = NULL;
         int r;
@@ -2493,7 +2507,12 @@ static int create_interactively(void) {
                 return 0;
         }
 
-        any_key_to_proceed();
+        printf("\nPlease create your user account!\n");
+
+        if (!any_key_to_proceed()) {
+                log_notice("Skipping.");
+                return 0;
+        }
 
         (void) terminal_reset_defensive_locked(STDOUT_FILENO, /* switch_to_text= */ false);
 
@@ -2516,7 +2535,7 @@ static int create_interactively(void) {
                         continue;
                 }
 
-                r = userdb_by_name(username, USERDB_SUPPRESS_SHADOW, /* ret= */ NULL);
+                r = userdb_by_name(username, /* match= */ NULL, USERDB_SUPPRESS_SHADOW, /* ret= */ NULL);
                 if (r == -ESRCH)
                         break;
                 if (r < 0)
@@ -2530,12 +2549,21 @@ static int create_interactively(void) {
                 return log_error_errno(r, "Failed to set userName field: %m");
 
         _cleanup_strv_free_ char **available = NULL, **groups = NULL;
-
         for (;;) {
                 _cleanup_free_ char *s = NULL;
-                unsigned u;
 
-                r = ask_string(&s,
+                strv_sort_uniq(groups);
+
+                if (!strv_isempty(groups)) {
+                        _cleanup_free_ char *j = strv_join(groups, ", ");
+                        if (!j)
+                                return log_oom();
+
+                        log_info("Currently selected groups: %s", j);
+                }
+
+                r = ask_string_full(&s,
+                               group_completion_callback, &available,
                                "%s Please enter an auxiliary group for user %s (empty to continue, \"list\" to list available groups): ",
                                special_glyph(SPECIAL_GLYPH_TRIANGULAR_BULLET), username);
                 if (r < 0)
@@ -2555,15 +2583,21 @@ static int create_interactively(void) {
                                         continue;
                         }
 
-                        r = show_menu(available, /*n_columns=*/ 3, /*width=*/ 20, /*percentage=*/ 60);
+                        r = show_menu(available,
+                                      /* n_columns= */ 3,
+                                      /* column_width= */ 20,
+                                      /* ellipsize_percentage= */ 60,
+                                      /* grey_prefix= */ NULL,
+                                      /* with_numbers= */ true);
                         if (r < 0)
-                                return r;
+                                return log_error_errno(r, "Failed to show menu: %m");
 
                         putchar('\n');
                         continue;
                 };
 
-                if (available) {
+                if (!strv_isempty(available)) {
+                        unsigned u;
                         r = safe_atou(s, &u);
                         if (r >= 0) {
                                 if (u <= 0 || u > strv_length(available)) {
@@ -2586,7 +2620,7 @@ static int create_interactively(void) {
                         continue;
                 }
 
-                r = groupdb_by_name(s, USERDB_SUPPRESS_SHADOW|USERDB_EXCLUDE_DYNAMIC_USER, /*ret=*/ NULL);
+                r = groupdb_by_name(s, /* match= */ NULL, USERDB_SUPPRESS_SHADOW|USERDB_EXCLUDE_DYNAMIC_USER, /*ret=*/ NULL);
                 if (r == -ESRCH) {
                         log_notice("Specified auxiliary group does not exist, try again: %s", s);
                         continue;
@@ -2601,7 +2635,7 @@ static int create_interactively(void) {
                         return log_oom();
         }
 
-        if (groups) {
+        if (!strv_isempty(groups)) {
                 strv_sort_uniq(groups);
 
                 r = sd_json_variant_set_field_strv(&arg_identity_extra, "memberOf", groups);
@@ -2615,13 +2649,13 @@ static int create_interactively(void) {
                 shell = mfree(shell);
 
                 r = ask_string(&shell,
-                               "%s Please enter the shell to use for user %s (empty to skip): ",
+                               "%s Please enter the shell to use for user %s (empty for default): ",
                                special_glyph(SPECIAL_GLYPH_TRIANGULAR_BULLET), username);
                 if (r < 0)
                         return log_error_errno(r, "Failed to query user for username: %m");
 
                 if (isempty(shell)) {
-                        log_info("No data entered, skipping.");
+                        log_info("No data entered, leaving at default.");
                         break;
                 }
 
@@ -2640,7 +2674,7 @@ static int create_interactively(void) {
                 log_notice("Specified shell '%s' is not installed, try another one.", shell);
         }
 
-        if (shell) {
+        if (!isempty(shell)) {
                 log_info("Selected %s as the shell for user %s", shell, username);
 
                 r = sd_json_variant_set_field_string(&arg_identity_extra, "shell", shell);
@@ -2672,12 +2706,20 @@ static int verb_firstboot(int argc, char *argv[], void *userdata) {
         if (r > 0) /* Already created users from credentials */
                 return 0;
 
-        r = has_regular_user();
-        if (r < 0)
-                return r;
-        if (r > 0) {
-                log_info("Regular user already present in user database, skipping user creation.");
+        r = getenv_bool("SYSTEMD_HOME_FIRSTBOOT_OVERRIDE");
+        if (r == 0)
                 return 0;
+        if (r < 0) {
+                if (r != -ENXIO)
+                        log_warning_errno(r, "Failed to parse $SYSTEMD_HOME_FIRSTBOOT_OVERRIDE, ignoring: %m");
+
+                r = has_regular_user();
+                if (r < 0)
+                        return r;
+                if (r > 0) {
+                        log_info("Regular user already present in user database, skipping user creation.");
+                        return 0;
+                }
         }
 
         return create_interactively();
@@ -2764,6 +2806,7 @@ static int help(int argc, char *argv[], void *userdata) {
                "\n%4$sGeneral User Record Properties:%5$s\n"
                "  -c --real-name=REALNAME      Real name for user\n"
                "     --realm=REALM             Realm to create user in\n"
+               "     --alias=ALIAS             Define alias usernames for this account\n"
                "     --email-address=EMAIL     Email address for user\n"
                "     --location=LOCATION       Set location of user on earth\n"
                "     --icon-name=NAME          Icon name for user\n"
@@ -2774,11 +2817,15 @@ static int help(int argc, char *argv[], void *userdata) {
                "                               Bounding POSIX capability set\n"
                "     --capability-ambient-set=CAPS\n"
                "                               Ambient POSIX capability set\n"
+               "     --access-mode=MODE        User home directory access mode\n"
+               "     --umask=MODE              Umask for user when logging in\n"
                "     --skel=PATH               Skeleton directory to use\n"
                "     --shell=PATH              Shell for account\n"
                "     --setenv=VARIABLE[=VALUE] Set an environment variable at log-in\n"
                "     --timezone=TIMEZONE       Set a time-zone\n"
                "     --language=LOCALE         Set preferred languages\n"
+               "     --default-area=AREA       Select default area\n"
+               "\n%4$sAuthentication User Record Properties:%5$s\n"
                "     --ssh-authorized-keys=KEYS\n"
                "                               Specify SSH public keys\n"
                "     --pkcs11-token-uri=URI    URI to PKCS#11 security token containing\n"
@@ -2814,7 +2861,7 @@ static int help(int argc, char *argv[], void *userdata) {
                "     --enforce-password-policy=BOOL\n"
                "                               Control whether to enforce system's password\n"
                "                               policy for this user\n"
-               "  -P                           Same as --enforce-password-password=no\n"
+               "  -P                           Same as --enforce-password-policy=no\n"
                "     --password-change-now=BOOL\n"
                "                               Require the password to be changed on next login\n"
                "     --password-change-min=TIME\n"
@@ -2827,8 +2874,6 @@ static int help(int argc, char *argv[], void *userdata) {
                "                               How much time to block password after expiry\n"
                "\n%4$sResource Management User Record Properties:%5$s\n"
                "     --disk-size=BYTES         Size to assign the user on disk\n"
-               "     --access-mode=MODE        User home directory access mode\n"
-               "     --umask=MODE              Umask for user when logging in\n"
                "     --nice=NICE               Nice level for user\n"
                "     --rlimit=LIMIT=VALUE[:VALUE]\n"
                "                               Set resource limits\n"
@@ -2837,6 +2882,9 @@ static int help(int argc, char *argv[], void *userdata) {
                "     --memory-max=BYTES        Set maximum memory limit\n"
                "     --cpu-weight=WEIGHT       Set CPU weight\n"
                "     --io-weight=WEIGHT        Set IO weight\n"
+               "     --tmp-limit=BYTES|PERCENT Set limit on /tmp/\n"
+               "     --dev-shm-limit=BYTES|PERCENT\n"
+               "                               Set limit on /dev/shm/\n"
                "\n%4$sStorage User Record Properties:%5$s\n"
                "     --storage=STORAGE         Storage type to use (luks, fscrypt, directory,\n"
                "                               subvolume, cifs)\n"
@@ -2908,6 +2956,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_NO_ASK_PASSWORD,
                 ARG_OFFLINE,
                 ARG_REALM,
+                ARG_ALIAS,
                 ARG_EMAIL_ADDRESS,
                 ARG_DISK_SIZE,
                 ARG_ACCESS_MODE,
@@ -2984,6 +3033,9 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_PROMPT_NEW_USER,
                 ARG_AVATAR,
                 ARG_LOGIN_BACKGROUND,
+                ARG_TMP_LIMIT,
+                ARG_DEV_SHM_LIMIT,
+                ARG_DEFAULT_AREA,
         };
 
         static const struct option options[] = {
@@ -2999,6 +3051,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "real-name",                    required_argument, NULL, 'c'                             },
                 { "comment",                      required_argument, NULL, 'c'                             }, /* Compat alias to keep thing in sync with useradd(8) */
                 { "realm",                        required_argument, NULL, ARG_REALM                       },
+                { "alias",                        required_argument, NULL, ARG_ALIAS                       },
                 { "email-address",                required_argument, NULL, ARG_EMAIL_ADDRESS               },
                 { "location",                     required_argument, NULL, ARG_LOCATION                    },
                 { "password-hint",                required_argument, NULL, ARG_PASSWORD_HINT               },
@@ -3083,6 +3136,9 @@ static int parse_argv(int argc, char *argv[]) {
                 { "blob",                         required_argument, NULL, 'b'                             },
                 { "avatar",                       required_argument, NULL, ARG_AVATAR                      },
                 { "login-background",             required_argument, NULL, ARG_LOGIN_BACKGROUND            },
+                { "tmp-limit",                    required_argument, NULL, ARG_TMP_LIMIT                   },
+                { "dev-shm-limit",                required_argument, NULL, ARG_DEV_SHM_LIMIT               },
+                { "default-area",                 required_argument, NULL, ARG_DEFAULT_AREA                },
                 {}
         };
 
@@ -3153,6 +3209,53 @@ static int parse_argv(int argc, char *argv[]) {
                                 return log_error_errno(r, "Failed to set realName field: %m");
 
                         break;
+
+                case ARG_ALIAS: {
+                        if (isempty(optarg)) {
+                                r = drop_from_identity("aliases");
+                                if (r < 0)
+                                        return r;
+                                break;
+                        }
+
+                        for (const char *p = optarg;;) {
+                                _cleanup_free_ char *word = NULL;
+
+                                r = extract_first_word(&p, &word, ",", 0);
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to parse alias list: %m");
+                                if (r == 0)
+                                        break;
+
+                                if (!valid_user_group_name(word, 0))
+                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Invalid alias user name %s.", word);
+
+                                _cleanup_(sd_json_variant_unrefp) sd_json_variant *av =
+                                        sd_json_variant_ref(sd_json_variant_by_key(arg_identity_extra, "aliases"));
+
+                                _cleanup_strv_free_ char **list = NULL;
+                                r = sd_json_variant_strv(av, &list);
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to parse group list: %m");
+
+                                r = strv_extend(&list, word);
+                                if (r < 0)
+                                        return log_oom();
+
+                                strv_sort_uniq(list);
+
+                                av = sd_json_variant_unref(av);
+                                r = sd_json_variant_new_array_strv(&av, list);
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to create alias list JSON: %m");
+
+                                r = sd_json_variant_set_field(&arg_identity_extra, "aliases", av);
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to update alias list: %m");
+                        }
+
+                        break;
+                }
 
                 case 'd': {
                         _cleanup_free_ char *hd = NULL;
@@ -4468,6 +4571,74 @@ static int parse_argv(int argc, char *argv[]) {
 
                         break;
                 }
+
+                case ARG_TMP_LIMIT:
+                case ARG_DEV_SHM_LIMIT: {
+                        const char *field =
+                                    c == ARG_TMP_LIMIT ? "tmpLimit" :
+                                c == ARG_DEV_SHM_LIMIT ? "devShmLimit" : NULL;
+                        const char *field_scale =
+                                    c == ARG_TMP_LIMIT ? "tmpLimitScale" :
+                                c == ARG_DEV_SHM_LIMIT ? "devShmLimitScale" : NULL;
+
+                        assert(field);
+                        assert(field_scale);
+
+                        if (isempty(optarg)) {
+                                r = drop_from_identity(field);
+                                if (r < 0)
+                                        return r;
+                                r = drop_from_identity(field_scale);
+                                if (r < 0)
+                                        return r;
+                                break;
+                        }
+
+                        r = parse_permyriad(optarg);
+                        if (r < 0) {
+                                uint64_t u;
+
+                                r = parse_size(optarg, 1024, &u);
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to parse %s/%s parameter: %s", field, field_scale, optarg);
+
+                                r = sd_json_variant_set_field_unsigned(&arg_identity_extra, field, u);
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to set %s field: %m", field);
+
+                                r = drop_from_identity(field_scale);
+                                if (r < 0)
+                                        return r;
+                        } else {
+                                r = sd_json_variant_set_field_unsigned(&arg_identity_extra, field_scale, UINT32_SCALE_FROM_PERMYRIAD(r));
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to set %s field: %m", field_scale);
+
+                                r = drop_from_identity(field);
+                                if (r < 0)
+                                        return r;
+                        }
+
+                        break;
+                }
+
+                case ARG_DEFAULT_AREA:
+                        if (isempty(optarg)) {
+                                r = drop_from_identity("defaultArea");
+                                if (r < 0)
+                                        return r;
+
+                                break;
+                        }
+
+                        if (!filename_is_valid(optarg))
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Parameter for default area field not valid: %s", optarg);
+
+                        r = sd_json_variant_set_field_string(&arg_identity_extra, "defaultArea", optarg);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to set default area field: %m");
+
+                        break;
 
                 case '?':
                         return -EINVAL;

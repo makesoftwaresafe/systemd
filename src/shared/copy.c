@@ -1147,7 +1147,7 @@ static int fd_copy_directory(
                                 if (buf.st_dev != original_device)
                                         continue;
 
-                                r = fd_is_mount_point(dirfd(d), de->d_name, 0);
+                                r = is_mount_point_at(dirfd(d), de->d_name, 0);
                                 if (r < 0)
                                         return r;
                                 if (r > 0)
@@ -1679,8 +1679,7 @@ int copy_xattr(int df, const char *from, int dt, const char *to, CopyFlags copy_
                 if (r < 0)
                         return r;
 
-                if (xsetxattr(dt, to, p, value, r, 0) < 0)
-                        ret = -errno;
+                RET_GATHER(ret, xsetxattr_full(dt, to, /* at_flags = */ 0, p, value, r, /* xattr_flags = */ 0));
         }
 
         return ret;

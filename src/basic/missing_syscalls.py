@@ -20,8 +20,11 @@ SYSCALLS = [
     'pidfd_open',
     'pidfd_send_signal',
     'pkey_mprotect',
+    'quotactl_fd',
+    'removexattrat',
     'renameat2',
     'setns',
+    'setxattrat',
     'statx',
 ]
 

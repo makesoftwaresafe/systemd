@@ -21,6 +21,7 @@
 #include "apparmor-util.h"
 #endif
 #include "argv-util.h"
+#include "ask-password-api.h"
 #include "barrier.h"
 #include "bitfield.h"
 #include "bpf-dlopen.h"
@@ -1048,15 +1049,114 @@ static int enforce_user(
 
 #if HAVE_PAM
 
-static int null_conv(
+static void pam_response_free_array(struct pam_response *responses, size_t n_responses) {
+        assert(responses || n_responses == 0);
+
+        FOREACH_ARRAY(resp, responses, n_responses)
+                erase_and_free(resp->resp);
+
+        free(responses);
+}
+
+typedef struct AskPasswordConvData {
+        const ExecContext *context;
+        const ExecParameters *params;
+} AskPasswordConvData;
+
+static int ask_password_conv(
                 int num_msg,
-                const struct pam_message **msg,
-                struct pam_response **resp,
-                void *appdata_ptr) {
+                const struct pam_message *msg[],
+                struct pam_response **ret,
+                void *userdata) {
 
-        /* We don't support conversations */
+        AskPasswordConvData *data = ASSERT_PTR(userdata);
+        bool set_credential_env_var = false;
+        int r;
 
-        return PAM_CONV_ERR;
+        assert(num_msg >= 0);
+        assert(msg);
+        assert(data->context);
+        assert(data->params);
+
+        size_t n = num_msg;
+        struct pam_response *responses = new0(struct pam_response, n);
+        if (!responses)
+                return PAM_BUF_ERR;
+        CLEANUP_ARRAY(responses, n, pam_response_free_array);
+
+        for (size_t i = 0; i < n; i++) {
+                const struct pam_message *mi = *msg + i;
+
+                switch (mi->msg_style) {
+
+                case PAM_PROMPT_ECHO_ON:
+                case PAM_PROMPT_ECHO_OFF: {
+
+                        /* Locally set the $CREDENTIALS_DIRECTORY to the credentials directory we just populated */
+                        if (!set_credential_env_var) {
+                                _cleanup_free_ char *creds_dir = NULL;
+                                r = exec_context_get_credential_directory(data->context, data->params, data->params->unit_id, &creds_dir);
+                                if (r < 0)
+                                        return log_exec_error_errno(data->context, data->params, r, "Failed to determine credentials directory: %m");
+
+                                if (creds_dir) {
+                                        if (setenv("CREDENTIALS_DIRECTORY", creds_dir, /* overwrite= */ true) < 0)
+                                                return log_exec_error_errno(data->context, data->params, r, "Failed to set $CREDENTIALS_DIRECTORY: %m");
+                                } else
+                                        (void) unsetenv("CREDENTIALS_DIRECTORY");
+
+                                set_credential_env_var = true;
+                        }
+
+                        _cleanup_free_ char *credential_name = strjoin("pam.authtok.", data->context->pam_name);
+                        if (!credential_name)
+                                return log_oom();
+
+                        AskPasswordRequest req = {
+                                .message = mi->msg,
+                                .credential = credential_name,
+                                .tty_fd = -EBADF,
+                                .hup_fd = -EBADF,
+                                .until = usec_add(now(CLOCK_MONOTONIC), 15 * USEC_PER_SEC),
+                        };
+
+                        _cleanup_strv_free_erase_ char **acquired = NULL;
+                        r = ask_password_auto(
+                                        &req,
+                                        ASK_PASSWORD_ACCEPT_CACHED|
+                                        ASK_PASSWORD_NO_TTY|
+                                        (mi->msg_style == PAM_PROMPT_ECHO_ON ? ASK_PASSWORD_ECHO : 0),
+                                        &acquired);
+                        if (r < 0) {
+                                log_exec_error_errno(data->context, data->params, r, "Failed to query for password: %m");
+                                return PAM_CONV_ERR;
+                        }
+
+                        responses[i].resp = strdup(ASSERT_PTR(acquired[0]));
+                        if (!responses[i].resp) {
+                                log_oom();
+                                return PAM_BUF_ERR;
+                        }
+                        break;
+                }
+
+                case PAM_ERROR_MSG:
+                        log_exec_error(data->context, data->params, "PAM: %s", mi->msg);
+                        break;
+
+                case PAM_TEXT_INFO:
+                        log_exec_info(data->context, data->params, "PAM: %s", mi->msg);
+                        break;
+
+                default:
+                        return PAM_CONV_ERR;
+                }
+        }
+
+        *ret = TAKE_PTR(responses);
+        n = 0;
+
+        return PAM_SUCCESS;
 }
 
 static int pam_close_session_and_delete_credentials(pam_handle_t *handle, int flags) {
@@ -1074,24 +1174,27 @@ static int pam_close_session_and_delete_credentials(pam_handle_t *handle, int fl
 
         return r != PAM_SUCCESS ? r : s;
 }
-
 #endif
 
 static int setup_pam(
-                const char *name,
+                const ExecContext *context,
+                ExecParameters *params,
                 const char *user,
                 uid_t uid,
                 gid_t gid,
-                const char *tty,
                 char ***env, /* updated on success */
                 const int fds[], size_t n_fds,
                 int exec_fd) {
 
 #if HAVE_PAM
+        AskPasswordConvData conv_data = {
+                .context = context,
+                .params = params,
+        };
 
-        static const struct pam_conv conv = {
-                .conv = null_conv,
-                .appdata_ptr = NULL
+        const struct pam_conv conv = {
+                .conv = ask_password_conv,
+                .appdata_ptr = &conv_data,
         };
 
         _cleanup_(barrier_destroy) Barrier barrier = BARRIER_NULL;
@@ -1103,8 +1206,12 @@ static int setup_pam(
         pid_t parent_pid;
         int flags = 0;
 
-        assert(name);
+        assert(context);
+        assert(params);
         assert(user);
+        assert(uid_is_valid(uid));
+        assert(gid_is_valid(gid));
+        assert(fds || n_fds == 0);
         assert(env);
 
         /* We set up PAM in the parent process, then fork. The child
@@ -1121,12 +1228,13 @@ static int setup_pam(
         if (log_get_max_level() < LOG_DEBUG)
                 flags |= PAM_SILENT;
 
-        pam_code = pam_start(name, user, &conv, &handle);
+        pam_code = pam_start(context->pam_name, user, &conv, &handle);
         if (pam_code != PAM_SUCCESS) {
                 handle = NULL;
                 goto fail;
         }
 
+        const char *tty = context->tty_path;
         if (!tty) {
                 _cleanup_free_ char *q = NULL;
 
@@ -3511,7 +3619,8 @@ static int apply_working_directory(
                 const ExecContext *context,
                 const ExecParameters *params,
                 ExecRuntime *runtime,
-                const char *home) {
+                const char *pwent_home,
+                char * const *env) {
 
         const char *wd;
         int r;
@@ -3519,10 +3628,15 @@ static int apply_working_directory(
         assert(context);
 
         if (context->working_directory_home) {
-                if (!home)
-                        return -ENXIO;
+                /* Preferably use the data from $HOME, in case it was updated by a PAM module */
+                wd = strv_env_get(env, "HOME");
+                if (!wd) {
+                        /* If that's not available, use the data from the struct passwd entry: */
+                        if (!pwent_home)
+                                return -ENXIO;
 
-                wd = home;
+                        wd = pwent_home;
+                }
         } else
                 wd = empty_to_root(context->working_directory);
 
@@ -4285,7 +4399,7 @@ int exec_invoke(
         _cleanup_free_ gid_t *supplementary_gids = NULL;
         const char *username = NULL, *groupname = NULL;
         _cleanup_free_ char *home_buffer = NULL, *memory_pressure_path = NULL, *own_user = NULL;
-        const char *home = NULL, *shell = NULL;
+        const char *pwent_home = NULL, *shell = NULL;
         char **final_argv = NULL;
         dev_t journal_stream_dev = 0;
         ino_t journal_stream_ino = 0;
@@ -4537,7 +4651,7 @@ int exec_invoke(
                         u = NULL;
 
                 if (u) {
-                        r = get_fixed_user(u, &username, &uid, &gid, &home, &shell);
+                        r = get_fixed_user(u, &username, &uid, &gid, &pwent_home, &shell);
                         if (r < 0) {
                                 *exit_status = EXIT_USER;
                                 return log_exec_error_errno(context, params, r, "Failed to determine user credentials: %m");
@@ -4569,7 +4683,7 @@ int exec_invoke(
 
         params->user_lookup_fd = safe_close(params->user_lookup_fd);
 
-        r = acquire_home(context, &home, &home_buffer);
+        r = acquire_home(context, &pwent_home, &home_buffer);
         if (r < 0) {
                 *exit_status = EXIT_CHDIR;
                 return log_exec_error_errno(context, params, r, "Failed to determine $HOME for the invoking user: %m");
@@ -4875,7 +4989,7 @@ int exec_invoke(
                         params,
                         cgroup_context,
                         n_fds,
-                        home,
+                        pwent_home,
                         username,
                         shell,
                         journal_stream_dev,
@@ -4976,7 +5090,7 @@ int exec_invoke(
                  * wins here. (See above.) */
 
                 /* All fds passed in the fds array will be closed in the pam child process. */
-                r = setup_pam(context->pam_name, username, uid, gid, context->tty_path, &accum_env, params->fds, n_fds, params->exec_fd);
+                r = setup_pam(context, params, username, uid, gid, &accum_env, params->fds, n_fds, params->exec_fd);
                 if (r < 0) {
                         *exit_status = EXIT_PAM;
                         return log_exec_error_errno(context, params, r, "Failed to set up PAM session: %m");
@@ -5397,7 +5511,7 @@ int exec_invoke(
          * running this service might have the correct privilege to change to the working directory. Also, it
          * is absolutely 💣 crucial 💣 we applied all mount namespacing rearrangements before this, so that
          * the cwd cannot be used to pin directories outside of the sandbox. */
-        r = apply_working_directory(context, params, runtime, home);
+        r = apply_working_directory(context, params, runtime, pwent_home, accum_env);
         if (r < 0) {
                 *exit_status = EXIT_CHDIR;
                 return log_exec_error_errno(context, params, r, "Changing to the requested working directory failed: %m");
@@ -5459,7 +5573,7 @@ int exec_invoke(
                          *
                          * Hence there is no security impact to raise it in the effective set before execve
                          */
-                        r = capability_gain_cap_setpcap(/* return_caps= */ NULL);
+                        r = capability_gain_cap_setpcap(/* ret_before_caps = */ NULL);
                         if (r < 0) {
                                 *exit_status = EXIT_CAPABILITIES;
                                 return log_exec_error_errno(context, params, r, "Failed to gain CAP_SETPCAP for setting secure bits");
