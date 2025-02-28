@@ -110,6 +110,15 @@ static const char *const image_root_table[_IMAGE_CLASS_MAX] = {
 
 DEFINE_STRING_TABLE_LOOKUP_TO_STRING(image_root, ImageClass);
 
+static const char *const image_root_runtime_table[_IMAGE_CLASS_MAX] = {
+        [IMAGE_MACHINE]  = "/run/machines",
+        [IMAGE_PORTABLE] = "/run/portables",
+        [IMAGE_SYSEXT]   = "/run/extensions",
+        [IMAGE_CONFEXT]  = "/run/confexts",
+};
+
+DEFINE_STRING_TABLE_LOOKUP_TO_STRING(image_root_runtime, ImageClass);
+
 static Image *image_free(Image *i) {
         assert(i);
 
@@ -1587,6 +1596,29 @@ int image_set_limit(Image *i, uint64_t referenced_max) {
                 return r;
 
         (void) image_update_quota(i, -EBADF);
+        return 0;
+}
+
+int image_set_pool_limit(ImageClass class, uint64_t referenced_max) {
+        const char *dir;
+        int r;
+
+        assert(class >= 0 && class < _IMAGE_CLASS_MAX);
+
+        dir = image_root_to_string(class);
+
+        r = btrfs_qgroup_set_limit(dir, /* qgroupid = */ 0, referenced_max);
+        if (ERRNO_IS_NEG_NOT_SUPPORTED(r))
+                return r;
+        if (r < 0)
+                log_debug_errno(r, "Failed to set limit on btrfs quota group for '%s', ignoring: %m", dir);
+
+        r = btrfs_subvol_set_subtree_quota_limit(dir, /* subvol_id = */ 0, referenced_max);
+        if (ERRNO_IS_NEG_NOT_SUPPORTED(r))
+                return r;
+        if (r < 0)
+                return log_debug_errno(r, "Failed to set subtree quota limit for '%s': %m", dir);
+
         return 0;
 }
 
