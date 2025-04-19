@@ -22,6 +22,7 @@
 #include "fs-util.h"
 #include "gcrypt-util.h"
 #include "id128-util.h"
+#include "log.h"
 #include "journal-authenticate.h"
 #include "journal-def.h"
 #include "journal-file.h"
@@ -32,6 +33,7 @@
 #include "path-util.h"
 #include "prioq.h"
 #include "random-util.h"
+#include "ratelimit.h"
 #include "set.h"
 #include "sort-util.h"
 #include "stat-util.h"
@@ -98,7 +100,7 @@ DEFINE_HASH_OPS_WITH_VALUE_DESTRUCTOR(
                 JournalFile, journal_file_close);
 
 static int mmap_prot_from_open_flags(int flags) {
-        switch (flags & O_ACCMODE) {
+        switch (flags & O_ACCMODE_STRICT) {
         case O_RDONLY:
                 return PROT_READ;
         case O_WRONLY:
@@ -4075,10 +4077,10 @@ int journal_file_open(
         assert(mmap_cache);
         assert(ret);
 
-        if (!IN_SET((open_flags & O_ACCMODE), O_RDONLY, O_RDWR))
+        if (!IN_SET((open_flags & O_ACCMODE_STRICT), O_RDONLY, O_RDWR))
                 return -EINVAL;
 
-        if ((open_flags & O_ACCMODE) == O_RDONLY && FLAGS_SET(open_flags, O_CREAT))
+        if ((open_flags & O_ACCMODE_STRICT) == O_RDONLY && FLAGS_SET(open_flags, O_CREAT))
                 return -EINVAL;
 
         if (fname && (open_flags & O_CREAT) && !endswith(fname, ".journal"))
