@@ -2,14 +2,18 @@
 
 #include <linux/sockios.h>
 #include <sys/ioctl.h>
+#include <sys/poll.h>
 
 #include "sd-varlink.h"
 
+#include "alloc-util.h"
 #include "io-util.h"
 #include "journald-manager.h"
 #include "journald-stream.h"
 #include "journald-sync.h"
 #include "journald-varlink.h"
+#include "log.h"
+#include "prioq.h"
 #include "socket-netlink.h"
 #include "time-util.h"
 
@@ -318,7 +322,7 @@ static void sync_req_advance_rqlen_revalidate(SyncReq *req, uint32_t current_rql
         sync_req_revalidate(req);
 }
 
-void manager_notify_stream(Manager *m, StdoutStream *ss) {
+void manager_notify_stream(Manager *m, StdoutStream *stream) {
         int r;
 
         assert(m);
@@ -339,7 +343,7 @@ void manager_notify_stream(Manager *m, StdoutStream *ss) {
 
         LIST_FOREACH(pending_rqlen, sr, m->sync_req_pending_rqlen)
                 /* NB: this might invalidate the SyncReq object! */
-                sync_req_advance_rqlen_revalidate(sr, current_qlen, ss);
+                sync_req_advance_rqlen_revalidate(sr, current_qlen, stream);
 }
 
 bool sync_req_revalidate(SyncReq *req) {

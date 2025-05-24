@@ -5,7 +5,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/resource.h>
-#include <sys/stat.h>
 
 #include "sd-bus.h"
 #include "sd-daemon.h"
@@ -21,6 +20,7 @@
 #include "bus-map-properties.h"
 #include "bus-message-util.h"
 #include "bus-unit-util.h"
+#include "bus-util.h"
 #include "bus-wait-for-jobs.h"
 #include "calendarspec.h"
 #include "capsule-util.h"

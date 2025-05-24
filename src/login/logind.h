@@ -1,28 +1,12 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-#include <stdbool.h>
 #include <sys/stat.h>
 
-#include "sd-bus.h"
-#include "sd-device.h"
-#include "sd-event.h"
-#include "sd-varlink.h"
-
 #include "calendarspec.h"
-#include "conf-parser.h"
-#include "hashmap.h"
 #include "list.h"
 #include "logind-action.h"
-#include "set.h"
-#include "time-util.h"
-#include "user-record.h"
-
-typedef struct Button Button;
-typedef struct Device Device;
-typedef struct Seat Seat;
-typedef struct Session Session;
-typedef struct User User;
+#include "logind-forward.h"
 
 typedef struct Manager {
         sd_event *event;
@@ -87,7 +71,7 @@ typedef struct Manager {
         bool unlink_nologin;
 
         char *wall_message;
-        bool enable_wall_messages;
+        bool wall_messages;
         sd_event_source *wall_message_timeout_source;
 
         bool shutdown_dry_run;

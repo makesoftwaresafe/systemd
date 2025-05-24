@@ -1,11 +1,10 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <errno.h>
 #include <fnmatch.h>
-#include <stdlib.h>
-#include <sys/prctl.h>
+#include <linux/capability.h>
 #include <unistd.h>
 
+#include "sd-bus.h"
 #include "sd-id128.h"
 #include "sd-messages.h"
 
@@ -13,15 +12,14 @@
 #include "alloc-util.h"
 #include "ansi-color.h"
 #include "bpf-firewall.h"
-#include "bpf-foreign.h"
-#include "bpf-socket-bind.h"
+#include "bpf-restrict-fs.h"
 #include "bus-common-errors.h"
 #include "bus-internal.h"
 #include "bus-util.h"
 #include "cgroup-setup.h"
 #include "cgroup-util.h"
 #include "chase.h"
-#include "dbus.h"
+#include "condition.h"
 #include "dbus-unit.h"
 #include "dropin.h"
 #include "dynamic-user.h"
@@ -32,6 +30,7 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "format-util.h"
+#include "fs-util.h"
 #include "id128-util.h"
 #include "install.h"
 #include "iovec-util.h"
@@ -40,8 +39,9 @@
 #include "load-fragment.h"
 #include "log.h"
 #include "logarithm.h"
-#include "macro.h"
 #include "mkdir-label.h"
+#include "manager.h"
+#include "mount-util.h"
 #include "mountpoint-util.h"
 #include "path-util.h"
 #include "process-util.h"
@@ -49,25 +49,20 @@
 #include "serialize.h"
 #include "set.h"
 #include "signal-util.h"
+#include "siphash24.h"
 #include "sparse-endian.h"
 #include "special.h"
 #include "specifier.h"
 #include "stat-util.h"
-#include "stdio-util.h"
 #include "string-table.h"
 #include "string-util.h"
 #include "strv.h"
-#include "terminal-util.h"
 #include "tmpfile-util.h"
 #include "umask-util.h"
 #include "unit.h"
 #include "unit-name.h"
 #include "user-util.h"
 #include "varlink.h"
-#include "virt.h"
-#if BPF_FRAMEWORK
-#include "bpf-link.h"
-#endif
 
 /* Thresholds for logging at INFO level about resource consumption */
 #define MENTIONWORTHY_CPU_NSEC     (1 * NSEC_PER_SEC)
@@ -4933,7 +4928,7 @@ int unit_kill_context(Unit *u, KillOperation k) {
                                                 SIGHUP,
                                                 CGROUP_IGNORE_SELF,
                                                 pid_set,
-                                                /* kill_log= */ NULL,
+                                                /* log_kill= */ NULL,
                                                 /* userdata= */ NULL);
                         }
                 }
@@ -6013,7 +6008,7 @@ int unit_warn_leftover_processes(Unit *u, bool start) {
                         crt->cgroup_path,
                         /* sig= */ 0,
                         /* flags= */ 0,
-                        /* set= */ NULL,
+                        /* killed_pids= */ NULL,
                         start ? unit_log_leftover_process_start : unit_log_leftover_process_stop,
                         u);
 }
@@ -6066,6 +6061,24 @@ int unit_pid_attachable(Unit *u, PidRef *pid, sd_bus_error *error) {
                 return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Process " PID_FMT " is a kernel thread, refusing.", pid->pid);
 
         return 0;
+}
+
+int unit_get_log_level_max(const Unit *u) {
+        if (u) {
+                if (u->debug_invocation)
+                        return LOG_DEBUG;
+
+                ExecContext *ec = unit_get_exec_context(u);
+                if (ec && ec->log_level_max >= 0)
+                        return ec->log_level_max;
+        }
+
+        return log_get_max_level();
+}
+
+bool unit_log_level_test(const Unit *u, int level) {
+        assert(u);
+        return LOG_PRI(level) <= unit_get_log_level_max(u);
 }
 
 void unit_log_success(Unit *u) {
@@ -6747,7 +6760,7 @@ static ActivationDetails *activation_details_free(ActivationDetails *details) {
         return mfree(details);
 }
 
-void activation_details_serialize(ActivationDetails *details, FILE *f) {
+void activation_details_serialize(const ActivationDetails *details, FILE *f) {
         if (!details || details->trigger_unit_type == _UNIT_TYPE_INVALID)
                 return;
 
@@ -6805,7 +6818,7 @@ int activation_details_deserialize(const char *key, const char *value, Activatio
         return -EINVAL;
 }
 
-int activation_details_append_env(ActivationDetails *details, char ***strv) {
+int activation_details_append_env(const ActivationDetails *details, char ***strv) {
         int r = 0;
 
         assert(strv);
@@ -6832,7 +6845,7 @@ int activation_details_append_env(ActivationDetails *details, char ***strv) {
         return r + !isempty(details->trigger_unit_name); /* Return the number of variables added to the env block */
 }
 
-int activation_details_append_pair(ActivationDetails *details, char ***strv) {
+int activation_details_append_pair(const ActivationDetails *details, char ***strv) {
         int r = 0;
 
         assert(strv);

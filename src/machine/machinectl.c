@@ -1,17 +1,14 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <arpa/inet.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <getopt.h>
-#include <math.h>
+#include <locale.h>
 #include <net/if.h>
-#include <netinet/in.h>
-#include <sys/mount.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include "sd-bus.h"
+#include "sd-event.h"
+#include "sd-journal.h"
 
 #include "alloc-util.h"
 #include "ask-password-agent.h"
@@ -25,29 +22,26 @@
 #include "bus-print-properties.h"
 #include "bus-unit-procs.h"
 #include "bus-unit-util.h"
+#include "bus-util.h"
 #include "bus-wait-for-jobs.h"
 #include "cgroup-show.h"
 #include "cgroup-util.h"
-#include "constants.h"
-#include "copy.h"
 #include "edit-util.h"
 #include "env-util.h"
-#include "fd-util.h"
+#include "format-util.h"
 #include "format-ifname.h"
 #include "format-table.h"
 #include "hostname-util.h"
 #include "import-util.h"
 #include "in-addr-util.h"
 #include "label-util.h"
-#include "locale-util.h"
 #include "log.h"
 #include "logs-show.h"
 #include "machine-dbus.h"
-#include "macro.h"
 #include "main-func.h"
-#include "mkdir.h"
 #include "nulstr-util.h"
 #include "osc-context.h"
+#include "output-mode.h"
 #include "pager.h"
 #include "parse-argument.h"
 #include "parse-util.h"
@@ -56,16 +50,15 @@
 #include "pretty-print.h"
 #include "process-util.h"
 #include "ptyfwd.h"
-#include "rlimit-util.h"
-#include "signal-util.h"
-#include "sort-util.h"
+#include "runtime-scope.h"
 #include "stdio-util.h"
 #include "string-table.h"
+#include "string-util.h"
 #include "strv.h"
 #include "terminal-util.h"
+#include "time-util.h"
 #include "unit-name.h"
 #include "verbs.h"
-#include "web-util.h"
 
 typedef enum MachineRunner {
         RUNNER_NSPAWN,
@@ -423,7 +416,6 @@ static int show_unit_cgroup(sd_bus *bus, const char *unit, pid_t leader) {
         _cleanup_free_ char *cgroup = NULL;
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         int r;
-        unsigned c;
 
         assert(bus);
         assert(unit);
@@ -435,12 +427,7 @@ static int show_unit_cgroup(sd_bus *bus, const char *unit, pid_t leader) {
         if (isempty(cgroup))
                 return 0;
 
-        c = columns();
-        if (c > 18)
-                c -= 18;
-        else
-                c = 0;
-
+        unsigned c = MAX(LESS_BY(columns(), 18U), 10U);
         r = unit_show_processes(bus, unit, cgroup, "\t\t  ", c, get_output_flags(), &error);
         if (r == -EBADR) {
 

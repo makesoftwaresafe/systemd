@@ -1,13 +1,13 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 #include "alloc-util.h"
+#include "argv-util.h"
 #include "exec-util.h"
 #include "fd-util.h"
-#include "fs-util.h"
-#include "macro.h"
 #include "path-util.h"
 #include "process-util.h"
 #include "rm-rf.h"
@@ -754,6 +754,22 @@ TEST(path_startswith) {
         test_path_startswith_one("/foo/bar/barfoo/", "/foo/bar/barfo", NULL, NULL);
         test_path_startswith_one("/foo/bar/barfoo/", "/foo/bar/bar", NULL, NULL);
         test_path_startswith_one("/foo/bar/barfoo/", "/fo", NULL, NULL);
+}
+
+static void test_path_startswith_return_leading_slash_one(const char *path, const char *prefix, const char *expected) {
+        const char *p;
+
+        log_debug("/* %s(%s, %s) */", __func__, path, prefix);
+
+        p = path_startswith_full(path, prefix, PATH_STARTSWITH_RETURN_LEADING_SLASH);
+        ASSERT_STREQ(p, expected);
+}
+
+TEST(path_startswith_return_leading_slash) {
+        test_path_startswith_return_leading_slash_one("/foo/bar", "/", "/foo/bar");
+        test_path_startswith_return_leading_slash_one("/foo/bar", "/foo", "/bar");
+        test_path_startswith_return_leading_slash_one("/foo/bar", "/foo/bar", NULL);
+        test_path_startswith_return_leading_slash_one("/foo/bar/", "/foo/bar", "/");
 }
 
 static void test_prefix_root_one(const char *r, const char *p, const char *expected) {

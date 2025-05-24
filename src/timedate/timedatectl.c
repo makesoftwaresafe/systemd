@@ -14,6 +14,8 @@
 #include "bus-locator.h"
 #include "bus-map-properties.h"
 #include "bus-print-properties.h"
+#include "bus-util.h"
+#include "constants.h"
 #include "env-util.h"
 #include "format-table.h"
 #include "in-addr-util.h"

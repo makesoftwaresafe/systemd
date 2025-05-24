@@ -206,9 +206,9 @@ int cg_read_subgroup(DIR *d, char **ret);
 
 typedef int (*cg_kill_log_func_t)(const PidRef *pid, int sig, void *userdata);
 
-int cg_kill(const char *path, int sig, CGroupFlags flags, Set *s, cg_kill_log_func_t kill_log, void *userdata);
+int cg_kill(const char *path, int sig, CGroupFlags flags, Set *killed_pids, cg_kill_log_func_t log_kill, void *userdata);
 int cg_kill_kernel_sigkill(const char *path);
-int cg_kill_recursive(const char *path, int sig, CGroupFlags flags, Set *s, cg_kill_log_func_t kill_log, void *userdata);
+int cg_kill_recursive(const char *path, int sig, CGroupFlags flags, Set *killed_pids, cg_kill_log_func_t log_kill, void *userdata);
 
 int cg_split_spec(const char *spec, char **ret_controller, char **ret_path);
 int cg_mangle_path(const char *path, char **ret);
@@ -226,31 +226,9 @@ int cg_is_delegated_fd(int fd);
 
 int cg_has_coredump_receive(const char *path);
 
-typedef enum {
-        CG_KEY_MODE_GRACEFUL = 1 << 0,
-} CGroupKeyMode;
-
 int cg_set_attribute(const char *controller, const char *path, const char *attribute, const char *value);
 int cg_get_attribute(const char *controller, const char *path, const char *attribute, char **ret);
-int cg_get_keyed_attribute_full(const char *controller, const char *path, const char *attribute, char **keys, char **values, CGroupKeyMode mode);
-
-static inline int cg_get_keyed_attribute(
-                const char *controller,
-                const char *path,
-                const char *attribute,
-                char **keys,
-                char **ret_values) {
-        return cg_get_keyed_attribute_full(controller, path, attribute, keys, ret_values, 0);
-}
-
-static inline int cg_get_keyed_attribute_graceful(
-                const char *controller,
-                const char *path,
-                const char *attribute,
-                char **keys,
-                char **ret_values) {
-        return cg_get_keyed_attribute_full(controller, path, attribute, keys, ret_values, CG_KEY_MODE_GRACEFUL);
-}
+int cg_get_keyed_attribute(const char *controller, const char *path, const char *attribute, char * const *keys, char **values);
 
 int cg_get_attribute_as_uint64(const char *controller, const char *path, const char *attribute, uint64_t *ret);
 
@@ -354,4 +332,4 @@ typedef union {
                 .file_handle.handle_type = FILEID_KERNFS,       \
         }
 
-#define CG_FILE_HANDLE_CGROUPID(fh) (*(uint64_t*) (fh).file_handle.f_handle)
+#define CG_FILE_HANDLE_CGROUPID(fh) (*CAST_ALIGN_PTR(uint64_t, (fh).file_handle.f_handle))

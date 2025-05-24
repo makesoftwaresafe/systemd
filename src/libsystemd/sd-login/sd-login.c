@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <errno.h>
 #include <poll.h>
 #include <sys/inotify.h>
 #include <unistd.h>
@@ -18,15 +17,12 @@
 #include "fs-util.h"
 #include "hostname-util.h"
 #include "io-util.h"
-#include "log.h"
 #include "login-util.h"
-#include "macro.h"
 #include "parse-util.h"
 #include "path-util.h"
 #include "pidfd-util.h"
-#include "process-util.h"
+#include "pidref.h"
 #include "socket-util.h"
-#include "stdio-util.h"
 #include "string-util.h"
 #include "strv.h"
 #include "user-util.h"
@@ -888,11 +884,11 @@ _public_ int sd_session_get_leader(const char *session, pid_t *leader) {
         return 0;
 }
 
-_public_ int sd_seat_get_active(const char *seat, char **session, uid_t *uid) {
+_public_ int sd_seat_get_active(const char *seat, char **ret_session, uid_t *ret_uid) {
         _cleanup_free_ char *p = NULL, *s = NULL, *t = NULL;
         int r;
 
-        assert_return(session || uid, -EINVAL);
+        assert_return(ret_session || ret_uid, -EINVAL);
 
         r = file_of_seat(seat, &p);
         if (r < 0)
@@ -906,20 +902,20 @@ _public_ int sd_seat_get_active(const char *seat, char **session, uid_t *uid) {
         if (r < 0)
                 return r;
 
-        if (session && !s)
+        if (ret_session && !s)
                 return -ENODATA;
 
-        if (uid && !t)
+        if (ret_uid && !t)
                 return -ENODATA;
 
-        if (uid && t) {
-                r = parse_uid(t, uid);
+        if (ret_uid && t) {
+                r = parse_uid(t, ret_uid);
                 if (r < 0)
                         return r;
         }
 
-        if (session && s)
-                *session = TAKE_PTR(s);
+        if (ret_session && s)
+                *ret_session = TAKE_PTR(s);
 
         return 0;
 }

@@ -1,17 +1,9 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#if HAVE_VALGRIND_MEMCHECK_H
-#include <valgrind/memcheck.h>
-#endif
-
 #include <fnmatch.h>
-#include <linux/dm-ioctl.h>
 #include <linux/loop.h>
 #include <sys/file.h>
 #include <sys/mount.h>
-#include <sys/prctl.h>
-#include <sys/wait.h>
-#include <sysexits.h>
 
 #if HAVE_OPENSSL
 #include <openssl/err.h>
@@ -34,29 +26,28 @@
 #include "constants.h"
 #include "copy.h"
 #include "cryptsetup-util.h"
-#include "device-nodes.h"
 #include "device-private.h"
-#include "device-util.h"
 #include "devnum-util.h"
-#include "discover-image.h"
 #include "dissect-image.h"
 #include "dm-util.h"
 #include "env-file.h"
 #include "env-util.h"
+#include "errno-util.h"
 #include "extension-util.h"
 #include "extract-word.h"
 #include "fd-util.h"
 #include "fileio.h"
-#include "fs-util.h"
+#include "format-util.h"
 #include "fsck-util.h"
 #include "gpt.h"
+#include "hash-funcs.h"
 #include "hexdecoct.h"
 #include "hostname-setup.h"
-#include "id128-util.h"
+#include "image-policy.h"
 #include "import-util.h"
 #include "io-util.h"
 #include "json-util.h"
-#include "missing_syscall.h"
+#include "loop-util.h"
 #include "mkdir-label.h"
 #include "mount-util.h"
 #include "mountpoint-util.h"
@@ -67,16 +58,13 @@
 #include "path-util.h"
 #include "proc-cmdline.h"
 #include "process-util.h"
-#include "raw-clone.h"
 #include "resize-fs.h"
 #include "signal-util.h"
-#include "sparse-endian.h"
+#include "siphash24.h"
 #include "stat-util.h"
-#include "stdio-util.h"
-#include "string-table.h"
 #include "string-util.h"
 #include "strv.h"
-#include "tmpfile-util.h"
+#include "time-util.h"
 #include "udev-util.h"
 #include "user-util.h"
 #include "xattr-util.h"
@@ -4029,6 +4017,14 @@ Architecture dissected_image_architecture(DissectedImage *img) {
         return _ARCHITECTURE_INVALID;
 }
 
+bool dissected_image_is_portable(DissectedImage *m) {
+        return m && strv_env_pairs_get(m->os_release, "PORTABLE_PREFIXES");
+}
+
+bool dissected_image_is_initrd(DissectedImage *m) {
+        return m && !strv_isempty(m->initrd_release);
+}
+
 int dissect_loop_device(
                 LoopDevice *loop,
                 const VeritySettings *verity,
@@ -4289,6 +4285,7 @@ int verity_dissect_and_mount(
                 const ImagePolicy *image_policy,
                 const ImageFilter *image_filter,
                 const ExtensionReleaseData *extension_release_data,
+                ImageClass required_class,
                 VeritySettings *verity,
                 DissectedImage **ret_image) {
 
@@ -4400,15 +4397,19 @@ int verity_dissect_and_mount(
          * extension-release.d/ content. Return -EINVAL if there's any mismatch.
          * First, check the distro ID. If that matches, then check the new SYSEXT_LEVEL value if
          * available, or else fallback to VERSION_ID. If neither is present (eg: rolling release),
-         * then a simple match on the ID will be performed. */
-        if (extension_release_data && extension_release_data->os_release_id) {
+         * then a simple match on the ID will be performed. Also if an extension class was specified,
+         * check that it matches or return ENOCSI (which looks like error-no-class if one squints enough). */
+        if ((extension_release_data && extension_release_data->os_release_id) || required_class >= 0) {
                 _cleanup_strv_free_ char **extension_release = NULL;
                 ImageClass class = IMAGE_SYSEXT;
 
                 assert(!isempty(extension_release_data->os_release_id));
 
-                r = load_extension_release_pairs(dest, IMAGE_SYSEXT, dissected_image->image_name, relax_extension_release_check, &extension_release);
+                r = load_extension_release_pairs(dest, required_class >= 0 ? required_class : IMAGE_SYSEXT, dissected_image->image_name, relax_extension_release_check, &extension_release);
                 if (r == -ENOENT) {
+                        if (required_class >= 0)
+                                return log_debug_errno(SYNTHETIC_ERRNO(ENOCSI), "Image %s extension-release metadata does not match the expected class", dissected_image->image_name);
+
                         r = load_extension_release_pairs(dest, IMAGE_CONFEXT, dissected_image->image_name, relax_extension_release_check, &extension_release);
                         if (r >= 0)
                                 class = IMAGE_CONFEXT;
@@ -4416,18 +4417,20 @@ int verity_dissect_and_mount(
                 if (r < 0)
                         return log_debug_errno(r, "Failed to parse image %s extension-release metadata: %m", dissected_image->image_name);
 
-                r = extension_release_validate(
-                                dissected_image->image_name,
-                                extension_release_data->os_release_id,
-                                extension_release_data->os_release_version_id,
-                                class == IMAGE_SYSEXT ? extension_release_data->os_release_sysext_level : extension_release_data->os_release_confext_level,
-                                extension_release_data->os_release_extension_scope,
-                                extension_release,
-                                class);
-                if (r == 0)
-                        return log_debug_errno(SYNTHETIC_ERRNO(ESTALE), "Image %s extension-release metadata does not match the root's", dissected_image->image_name);
-                if (r < 0)
-                        return log_debug_errno(r, "Failed to compare image %s extension-release metadata with the root's os-release: %m", dissected_image->image_name);
+                if (extension_release_data && !isempty(extension_release_data->os_release_id)) {
+                        r = extension_release_validate(
+                                        dissected_image->image_name,
+                                        extension_release_data->os_release_id,
+                                        extension_release_data->os_release_version_id,
+                                        class == IMAGE_SYSEXT ? extension_release_data->os_release_sysext_level : extension_release_data->os_release_confext_level,
+                                        extension_release_data->os_release_extension_scope,
+                                        extension_release,
+                                        class);
+                        if (r == 0)
+                                return log_debug_errno(SYNTHETIC_ERRNO(ESTALE), "Image %s extension-release metadata does not match the root's", dissected_image->image_name);
+                        if (r < 0)
+                                return log_debug_errno(r, "Failed to compare image %s extension-release metadata with the root's os-release: %m", dissected_image->image_name);
+                }
         }
 
         r = dissected_image_relinquish(dissected_image);

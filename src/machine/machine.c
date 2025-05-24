@@ -1,9 +1,11 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <errno.h>
+#include <sched.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "sd-bus.h"
+#include "sd-event.h"
 #include "sd-messages.h"
 
 #include "alloc-util.h"
@@ -11,7 +13,6 @@
 #include "bus-internal.h"
 #include "bus-locator.h"
 #include "bus-unit-util.h"
-#include "bus-util.h"
 #include "env-file.h"
 #include "errno-util.h"
 #include "escape.h"
@@ -21,6 +22,7 @@
 #include "format-util.h"
 #include "fs-util.h"
 #include "hashmap.h"
+#include "log.h"
 #include "machine.h"
 #include "machine-dbus.h"
 #include "machined.h"
@@ -36,6 +38,7 @@
 #include "stdio-util.h"
 #include "string-table.h"
 #include "string-util.h"
+#include "strv.h"
 #include "terminal-util.h"
 #include "tmpfile-util.h"
 #include "uid-range.h"
@@ -1192,6 +1195,10 @@ int machine_get_uid_shift(Machine *m, uid_t *ret) {
         if (uid_range != (uid_t) gid_range)
                 return -ENXIO;
 
+        r = pidref_verify(&m->leader);
+        if (r < 0)
+                return r;
+
         *ret = uid_shift;
         return 0;
 }
@@ -1243,6 +1250,10 @@ static int machine_owns_uid_internal(
                 converted = (uid - uid_shift + uid_base);
                 if (!uid_is_valid(converted))
                         return -EINVAL;
+
+                r = pidref_verify(&machine->leader);
+                if (r < 0)
+                        return r;
 
                 if (ret_internal_uid)
                         *ret_internal_uid = converted;
@@ -1306,6 +1317,10 @@ static int machine_translate_uid_internal(
                 converted = uid - uid_base + uid_shift;
                 if (!uid_is_valid(converted))
                         return -EINVAL;
+
+                r = pidref_verify(&machine->leader);
+                if (r < 0)
+                        return r;
 
                 if (ret_host_uid)
                         *ret_host_uid = converted;

@@ -7,11 +7,11 @@
 #include "bitfield.h"
 #include "chase.h"
 #include "fd-util.h"
-#include "fs-util.h"
 #include "log.h"
 #include "parse-util.h"
 #include "path-util.h"
 #include "recurse-dir.h"
+#include "stat-util.h"
 #include "string-util.h"
 #include "strv.h"
 #include "vpick.h"
@@ -689,6 +689,41 @@ int path_pick_update_warn(
                 free_and_replace(*path, result.path);
 
         return 1;
+}
+
+int path_uses_vpick(const char *path) {
+        _cleanup_free_ char *dir = NULL, *parent = NULL, *fname = NULL;
+        int r;
+
+        assert(path);
+
+        r = path_extract_filename(path, &fname);
+        if (r == -EADDRNOTAVAIL)
+                return 0;
+        if (r < 0)
+                return r;
+
+        /* ...PATH/NAME.SUFFIX.v */
+        if (endswith(fname, ".v"))
+                return 1;
+
+        /* ...PATH.v/NAME___.SUFFIX */
+        if (!strrstr(fname, "___"))
+                return 0;
+
+        r = path_extract_directory(path, &dir);
+        if (IN_SET(r, -EDESTADDRREQ, -EADDRNOTAVAIL)) /* only filename specified (no dir), or root or "." */
+                return 0;
+        if (r < 0)
+                return r;
+
+        r = path_extract_filename(dir, &parent);
+        if (r == -EADDRNOTAVAIL)
+                return 0;
+        if (r < 0)
+                return r;
+
+        return !!endswith(parent, ".v");
 }
 
 const PickFilter pick_filter_image_raw = {

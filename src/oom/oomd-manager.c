@@ -1,25 +1,30 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
+#include "sd-bus.h"
 #include "sd-daemon.h"
+#include "sd-event.h"
 #include "sd-json.h"
 
 #include "alloc-util.h"
 #include "bus-log-control-api.h"
-#include "bus-polkit.h"
+#include "bus-object.h"
 #include "bus-util.h"
 #include "cgroup-util.h"
+#include "constants.h"
 #include "daemon-util.h"
 #include "fd-util.h"
-#include "fileio.h"
 #include "format-util.h"
 #include "json-util.h"
-#include "memory-util.h"
 #include "memstream-util.h"
 #include "oomd-conf.h"
 #include "oomd-manager.h"
 #include "oomd-manager-bus.h"
+#include "parse-util.h"
 #include "path-util.h"
 #include "percent-util.h"
+#include "set.h"
+#include "string-util.h"
+#include "time-util.h"
 #include "varlink-io.systemd.oom.h"
 #include "varlink-io.systemd.service.h"
 #include "varlink-util.h"
@@ -684,7 +689,7 @@ int manager_new(Manager **ret) {
 
         (void) sd_event_set_watchdog(m->event, true);
 
-        r = sd_event_add_signal(m->event, /* ret_event_source= */ NULL, SIGHUP | SD_EVENT_SIGNAL_PROCMASK, manager_dispatch_reload_signal, m);
+        r = sd_event_add_signal(m->event, /* ret= */ NULL, SIGHUP | SD_EVENT_SIGNAL_PROCMASK, manager_dispatch_reload_signal, m);
         if (r < 0)
                 return r;
 

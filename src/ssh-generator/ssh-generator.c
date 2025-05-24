@@ -1,7 +1,5 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <fcntl.h>
-#include <sys/ioctl.h>
 #include <unistd.h>
 
 #include "alloc-util.h"
@@ -14,6 +12,7 @@
 #include "log.h"
 #include "missing_socket.h"
 #include "parse-util.h"
+#include "path-lookup.h"
 #include "path-util.h"
 #include "proc-cmdline.h"
 #include "socket-netlink.h"

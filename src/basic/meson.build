@@ -118,6 +118,8 @@ basic_sources = files(
         'xattr-util.c',
 )
 
+sources += basic_sources
+
 missing_audit_h = files('missing_audit.h')
 missing_socket_h = files('missing_socket.h')
 
@@ -153,20 +155,20 @@ errno_list_txt = custom_target(
         capture : true)
 
 generated_gperf_headers = []
-foreach item : [['af',     af_list_txt,     'af',         ''],
-                ['arphrd', arphrd_list_txt, 'arphrd',     'ARPHRD_'],
-                ['cap',    cap_list_txt,    'capability', ''],
-                ['errno',  errno_list_txt,  'errno',      '']]
+foreach item : [['af',     af_list_txt,     'af',         '',        ['<sys/socket.h>']],
+                ['arphrd', arphrd_list_txt, 'arphrd',     'ARPHRD_', []],
+                ['cap',    cap_list_txt,    'capability', '',        []],
+                ['errno',  errno_list_txt,  'errno',      '',        []]]
 
         fname = '@0@-from-name.gperf'.format(item[0])
         gperf_file = custom_target(
                 fname,
                 input : item[1],
                 output : fname,
-                command : [generate_gperfs, item[2], item[3], '@INPUT@'],
+                command : [generate_gperfs, item[2], item[3], '@INPUT@'] + item[4],
                 capture : true)
 
-        fname = '@0@-from-name.h'.format(item[0])
+        fname = '@0@-from-name.inc'.format(item[0])
         target1 = custom_target(
                 fname,
                 input : gperf_file,
@@ -179,7 +181,7 @@ foreach item : [['af',     af_list_txt,     'af',         ''],
                            '@INPUT@'],
                 capture : true)
 
-        fname = '@0@-to-name.h'.format(item[0])
+        fname = '@0@-to-name.inc'.format(item[0])
         awkscript = '@0@-to-name.awk'.format(item[0])
         target2 = custom_target(
                 fname,
@@ -264,8 +266,8 @@ filesystems_gperf_h = custom_target(
         command : [gperf, '@INPUT@', '--output-file', '@OUTPUT@'])
 
 generate_filesystem_list = find_program('generate-filesystem-list.py')
-fname = 'filesystem-list.h'
-filesystem_list_h = custom_target(
+fname = 'filesystem-list.inc'
+filesystem_list_inc = custom_target(
         fname,
         input : 'filesystems-gperf.gperf',
         output : fname,
@@ -273,18 +275,18 @@ filesystem_list_h = custom_target(
                    '@INPUT@'],
         capture : true)
 
-generate_filesystem_switch_case_h = find_program('generate-filesystem-switch-case.py')
-fname = 'filesystem-switch-case.h'
-filesystem_switch_case_h = custom_target(
+generate_filesystem_switch_case_inc = find_program('generate-filesystem-switch-case.py')
+fname = 'filesystem-switch-case.inc'
+filesystem_switch_case_inc = custom_target(
         fname,
         input : 'filesystems-gperf.gperf',
-        output : 'filesystem-switch-case.h',
-        command : [generate_filesystem_switch_case_h,
+        output : fname,
+        command : [generate_filesystem_switch_case_inc,
                    '@INPUT@'],
         capture : true)
 
-generated_sources += [filesystem_list_h, filesystem_switch_case_h, filesystems_gperf_h]
-basic_sources += [filesystem_list_h, filesystem_switch_case_h, filesystems_gperf_h]
+generated_sources += [filesystem_list_inc, filesystem_switch_case_inc, filesystems_gperf_h]
+basic_sources += [filesystem_list_inc, filesystem_switch_case_inc, filesystems_gperf_h]
 
 libbasic_static = static_library(
         'basic',

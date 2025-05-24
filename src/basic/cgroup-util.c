@@ -292,7 +292,7 @@ int cg_kill(
                 const char *path,
                 int sig,
                 CGroupFlags flags,
-                Set *s,
+                Set *killed_pids,
                 cg_kill_log_func_t log_kill,
                 void *userdata) {
 
@@ -312,9 +312,9 @@ int cg_kill(
          *
          * When sending SIGKILL, prefer cg_kill_kernel_sigkill(), which is fully atomic. */
 
-        if (!s) {
-                s = allocated_set = set_new(NULL);
-                if (!s)
+        if (!killed_pids) {
+                killed_pids = allocated_set = set_new(NULL);
+                if (!killed_pids)
                         return -ENOMEM;
         }
 
@@ -343,7 +343,7 @@ int cg_kill(
                         if ((flags & CGROUP_IGNORE_SELF) && pidref_is_self(&pidref))
                                 continue;
 
-                        if (set_contains(s, PID_TO_PTR(pidref.pid)))
+                        if (set_contains(killed_pids, PID_TO_PTR(pidref.pid)))
                                 continue;
 
                         /* Ignore kernel threads to mimic the behavior of cgroup.kill. */
@@ -373,7 +373,7 @@ int cg_kill(
 
                         done = false;
 
-                        r = set_put(s, PID_TO_PTR(pidref.pid));
+                        r = set_put(killed_pids, PID_TO_PTR(pidref.pid));
                         if (r < 0)
                                 return RET_GATHER(ret, r);
                 }
@@ -390,7 +390,7 @@ int cg_kill_recursive(
                 const char *path,
                 int sig,
                 CGroupFlags flags,
-                Set *s,
+                Set *killed_pids,
                 cg_kill_log_func_t log_kill,
                 void *userdata) {
 
@@ -401,13 +401,13 @@ int cg_kill_recursive(
         assert(path);
         assert(sig >= 0);
 
-        if (!s) {
-                s = allocated_set = set_new(NULL);
-                if (!s)
+        if (!killed_pids) {
+                killed_pids = allocated_set = set_new(NULL);
+                if (!killed_pids)
                         return -ENOMEM;
         }
 
-        ret = cg_kill(path, sig, flags, s, log_kill, userdata);
+        ret = cg_kill(path, sig, flags, killed_pids, log_kill, userdata);
 
         r = cg_enumerate_subgroups(SYSTEMD_CGROUP_CONTROLLER, path, &d);
         if (r < 0) {
@@ -432,7 +432,7 @@ int cg_kill_recursive(
                 if (!p)
                         return -ENOMEM;
 
-                r = cg_kill_recursive(p, sig, flags, s, log_kill, userdata);
+                r = cg_kill_recursive(p, sig, flags, killed_pids, log_kill, userdata);
                 if (r < 0)
                         log_debug_errno(r, "Failed to recursively kill processes in cgroup '%s': %m", p);
                 if (r != 0 && ret >= 0)
@@ -959,13 +959,12 @@ int cg_get_root_path(char **ret_path) {
 }
 
 int cg_shift_path(const char *cgroup, const char *root, const char **ret_shifted) {
-        _cleanup_free_ char *rt = NULL;
-        char *p;
         int r;
 
         assert(cgroup);
         assert(ret_shifted);
 
+        _cleanup_free_ char *rt = NULL;
         if (!root) {
                 /* If the root was specified let's use that, otherwise
                  * let's determine it from PID 1 */
@@ -977,12 +976,7 @@ int cg_shift_path(const char *cgroup, const char *root, const char **ret_shifted
                 root = rt;
         }
 
-        p = path_startswith(cgroup, root);
-        if (p && p > cgroup)
-                *ret_shifted = p - 1;
-        else
-                *ret_shifted = cgroup;
-
+        *ret_shifted = path_startswith_full(cgroup, root, PATH_STARTSWITH_RETURN_LEADING_SLASH|PATH_STARTSWITH_REFUSE_DOT_DOT) ?: cgroup;
         return 0;
 }
 
@@ -1777,56 +1771,61 @@ int cg_get_owner(const char *path, uid_t *ret_uid) {
         return 0;
 }
 
-int cg_get_keyed_attribute_full(
+int cg_get_keyed_attribute(
                 const char *controller,
                 const char *path,
                 const char *attribute,
-                char **keys,
-                char **ret_values,
-                CGroupKeyMode mode) {
+                char * const *keys,
+                char **values) {
 
         _cleanup_free_ char *filename = NULL, *contents = NULL;
-        const char *p;
-        size_t n, i, n_done = 0;
-        char **v;
+        size_t n;
         int r;
 
+        assert(path);
+        assert(attribute);
+
         /* Reads one or more fields of a cgroup v2 keyed attribute file. The 'keys' parameter should be an strv with
-         * all keys to retrieve. The 'ret_values' parameter should be passed as string size with the same number of
+         * all keys to retrieve. The 'values' parameter should be passed as string size with the same number of
          * entries as 'keys'. On success each entry will be set to the value of the matching key.
          *
-         * If the attribute file doesn't exist at all returns ENOENT, if any key is not found returns ENXIO. If mode
-         * is set to GG_KEY_MODE_GRACEFUL we ignore missing keys and return those that were parsed successfully. */
+         * If the attribute file doesn't exist at all returns ENOENT, if any key is not found returns ENXIO. */
 
         r = cg_get_path(controller, path, attribute, &filename);
         if (r < 0)
                 return r;
 
-        r = read_full_file(filename, &contents, NULL);
+        r = read_full_file(filename, &contents, /* ret_size = */ NULL);
         if (r < 0)
                 return r;
 
         n = strv_length(keys);
         if (n == 0) /* No keys to retrieve? That's easy, we are done then */
                 return 0;
+        assert(strv_is_uniq(keys));
 
         /* Let's build this up in a temporary array for now in order not to clobber the return parameter on failure */
-        v = newa0(char*, n);
+        char **v = newa0(char*, n);
+        size_t n_done = 0;
 
-        for (p = contents; *p;) {
-                const char *w = NULL;
+        for (const char *p = contents; *p;) {
+                const char *w;
+                size_t i;
 
-                for (i = 0; i < n; i++)
-                        if (!v[i]) {
-                                w = first_word(p, keys[i]);
-                                if (w)
-                                        break;
-                        }
+                for (i = 0; i < n; i++) {
+                        w = first_word(p, keys[i]);
+                        if (w)
+                                break;
+                }
 
                 if (w) {
-                        size_t l;
+                        if (v[i]) { /* duplicate entry? */
+                                r = -EBADMSG;
+                                goto fail;
+                        }
 
-                        l = strcspn(w, NEWLINE);
+                        size_t l = strcspn(w, NEWLINE);
+
                         v[i] = strndup(w, l);
                         if (!v[i]) {
                                 r = -ENOMEM;
@@ -1835,7 +1834,7 @@ int cg_get_keyed_attribute_full(
 
                         n_done++;
                         if (n_done >= n)
-                                goto done;
+                                break;
 
                         p = w + l;
                 } else
@@ -1844,21 +1843,17 @@ int cg_get_keyed_attribute_full(
                 p += strspn(p, NEWLINE);
         }
 
-        if (mode & CG_KEY_MODE_GRACEFUL)
-                goto done;
+        if (n_done < n) {
+                r = -ENXIO;
+                goto fail;
+        }
 
-        r = -ENXIO;
+        memcpy(values, v, sizeof(char*) * n);
+        return 0;
 
 fail:
         free_many_charp(v, n);
         return r;
-
-done:
-        memcpy(ret_values, v, sizeof(char*) * n);
-        if (mode & CG_KEY_MODE_GRACEFUL)
-                return n_done;
-
-        return 0;
 }
 
 int cg_mask_to_string(CGroupMask mask, char **ret) {

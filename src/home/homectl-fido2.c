@@ -1,14 +1,8 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#if HAVE_LIBFIDO2
-#include <fido.h>
-#endif
-
 #include "alloc-util.h"
-#include "ask-password-api.h"
 #include "errno-util.h"
 #include "fido2-util.h"
-#include "format-table.h"
 #include "hexdecoct.h"
 #include "homectl-fido2.h"
 #include "homectl-pkcs11.h"
@@ -16,10 +10,7 @@
 #include "json-util.h"
 #include "libcrypt-util.h"
 #include "libfido2-util.h"
-#include "locale-util.h"
 #include "log.h"
-#include "memory-util.h"
-#include "random-util.h"
 #include "string-util.h"
 #include "strv.h"
 
@@ -180,8 +171,8 @@ int identity_add_fido2_parameters(
                         /* user_id= */ fido_un, strlen(fido_un), /* We pass the user ID and name as the same */
                         /* user_name= */ fido_un,
                         /* user_display_name= */ rn ? sd_json_variant_string(rn) : NULL,
-                        /* user_icon_name= */ NULL,
-                        /* askpw_icon_name= */ "user-home",
+                        /* user_icon= */ NULL,
+                        /* askpw_icon= */ "user-home",
                         /* askpw_credential= */ "home.token-pin",
                         lock_with,
                         cred_alg,

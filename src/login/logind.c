@@ -1,46 +1,43 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <errno.h>
 #include <fcntl.h>
-#include <sys/types.h>
 #include <unistd.h>
 
+#include "sd-bus.h"
 #include "sd-daemon.h"
 #include "sd-device.h"
+#include "sd-event.h"
 
 #include "alloc-util.h"
-#include "bus-error.h"
 #include "bus-locator.h"
 #include "bus-log-control-api.h"
-#include "bus-polkit.h"
-#include "cgroup-util.h"
+#include "bus-object.h"
 #include "common-signal.h"
-#include "constants.h"
 #include "daemon-util.h"
 #include "device-util.h"
 #include "devnum-util.h"
 #include "dirent-util.h"
+#include "errno-util.h"
 #include "escape.h"
 #include "fd-util.h"
 #include "format-util.h"
 #include "fs-util.h"
+#include "hashmap.h"
+#include "label-util.h"
+#include "logind-session.h"
 #include "logind.h"
 #include "logind-button.h"
 #include "logind-dbus.h"
 #include "logind-device.h"
 #include "logind-seat.h"
-#include "logind-seat-dbus.h"
-#include "logind-session-dbus.h"
 #include "logind-session-device.h"
 #include "logind-user.h"
-#include "logind-user-dbus.h"
 #include "logind-utmp.h"
 #include "logind-varlink.h"
 #include "main-func.h"
 #include "mkdir-label.h"
 #include "parse-util.h"
 #include "process-util.h"
-#include "selinux-util.h"
 #include "service-util.h"
 #include "signal-util.h"
 #include "strv.h"
@@ -96,7 +93,7 @@ static int manager_new(Manager **ret) {
         if (r < 0)
                 return r;
 
-        r = sd_event_add_signal(m->event, /* ret_event_source= */ NULL, (SIGRTMIN+18)|SD_EVENT_SIGNAL_PROCMASK, sigrtmin18_handler, /* userdata= */ NULL);
+        r = sd_event_add_signal(m->event, /* ret= */ NULL, (SIGRTMIN+18)|SD_EVENT_SIGNAL_PROCMASK, sigrtmin18_handler, /* userdata= */ NULL);
         if (r < 0)
                 return r;
 
@@ -883,7 +880,7 @@ static int manager_connect_console(Manager *m) {
 
         assert_se(ignore_signals(SIGRTMIN + 1) >= 0);
 
-        r = sd_event_add_signal(m->event, /* ret_event_source= */ NULL, (SIGRTMIN + 0) | SD_EVENT_SIGNAL_PROCMASK, manager_vt_switch, m);
+        r = sd_event_add_signal(m->event, /* ret= */ NULL, (SIGRTMIN + 0) | SD_EVENT_SIGNAL_PROCMASK, manager_vt_switch, m);
         if (r < 0)
                 return log_error_errno(r, "Failed to subscribe to SIGRTMIN+0 signal: %m");
 
@@ -1134,7 +1131,7 @@ static int manager_startup(Manager *m) {
 
         assert(m);
 
-        r = sd_event_add_signal(m->event, /* ret_event_source= */ NULL, SIGHUP|SD_EVENT_SIGNAL_PROCMASK, manager_dispatch_reload_signal, m);
+        r = sd_event_add_signal(m->event, /* ret= */ NULL, SIGHUP|SD_EVENT_SIGNAL_PROCMASK, manager_dispatch_reload_signal, m);
         if (r < 0)
                 return log_error_errno(r, "Failed to register SIGHUP handler: %m");
 

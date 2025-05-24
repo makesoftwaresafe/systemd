@@ -1,28 +1,23 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-#include <errno.h>
-#include <stdbool.h>
-#include <stdlib.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
 #include "sd-id128.h"
 
-#include "cgroup.h"
-#include "condition.h"
+#include "core-forward.h"
 #include "emergency-action.h"
 #include "execute.h"
+#include "hashmap.h"
 #include "install.h"
+#include "iterator.h"
 #include "job.h"
 #include "list.h"
+#include "log.h"
 #include "log-context.h"
-#include "mount-util.h"
-#include "pidref.h"
 #include "ratelimit.h"
+#include "time-util.h"
+#include "unit-def.h"
+#include "unit-dependency-atom.h"
 #include "unit-file.h"
-
-typedef struct UnitRef UnitRef;
 
 typedef enum UnitMountDependencyType {
         UNIT_MOUNT_WANTS,
@@ -148,7 +143,7 @@ typedef struct ActivationDetails {
 
 /* For casting an activation event into the various unit-specific types */
 #define DEFINE_ACTIVATION_DETAILS_CAST(UPPERCASE, MixedCase, UNIT_TYPE)         \
-        static inline MixedCase* UPPERCASE(ActivationDetails *a) {              \
+        static inline MixedCase* UPPERCASE(const ActivationDetails *a) {              \
                 if (_unlikely_(!a || a->trigger_unit_type != UNIT_##UNIT_TYPE)) \
                         return NULL;                                            \
                                                                                 \
@@ -166,10 +161,10 @@ typedef struct ActivationDetails {
 ActivationDetails *activation_details_new(Unit *trigger_unit);
 ActivationDetails *activation_details_ref(ActivationDetails *p);
 ActivationDetails *activation_details_unref(ActivationDetails *p);
-void activation_details_serialize(ActivationDetails *p, FILE *f);
+void activation_details_serialize(const ActivationDetails *p, FILE *f);
 int activation_details_deserialize(const char *key, const char *value, ActivationDetails **info);
-int activation_details_append_env(ActivationDetails *info, char ***strv);
-int activation_details_append_pair(ActivationDetails *info, char ***strv);
+int activation_details_append_env(const ActivationDetails *info, char ***strv);
+int activation_details_append_pair(const ActivationDetails *info, char ***strv);
 DEFINE_TRIVIAL_CLEANUP_FUNC(ActivationDetails*, activation_details_unref);
 
 typedef struct ActivationDetailsVTable {
@@ -184,18 +179,18 @@ typedef struct ActivationDetailsVTable {
         void (*done)(ActivationDetails *info);
 
         /* This should serialize all type-specific variables. */
-        void (*serialize)(ActivationDetails *info, FILE *f);
+        void (*serialize)(const ActivationDetails *info, FILE *f);
 
         /* This should deserialize all type-specific variables, one at a time. */
         int (*deserialize)(const char *key, const char *value, ActivationDetails **info);
 
         /* This should format the type-specific variables for the env block of the spawned service,
          * and return the number of added items. */
-        int (*append_env)(ActivationDetails *info, char ***strv);
+        int (*append_env)(const ActivationDetails *info, char ***strv);
 
         /* This should append type-specific variables as key/value pairs for the D-Bus property of the job,
          * and return the number of added pairs. */
-        int (*append_pair)(ActivationDetails *info, char ***strv);
+        int (*append_pair)(const ActivationDetails *info, char ***strv);
 } ActivationDetailsVTable;
 
 extern const ActivationDetailsVTable * const activation_details_vtable[_UNIT_TYPE_MAX];
@@ -217,14 +212,14 @@ static inline void* UNIT_DEPENDENCY_TO_PTR(UnitDependency d) {
         return INT_TO_PTR(d);
 }
 
-struct UnitRef {
+typedef struct UnitRef {
         /* Keeps tracks of references to a unit. This is useful so
          * that we can merge two units if necessary and correct all
          * references to them */
 
         Unit *source, *target;
         LIST_FIELDS(UnitRef, refs_by_target);
-};
+} UnitRef;
 
 /* The generic, dynamic definition of the unit */
 typedef struct Unit {
@@ -1018,23 +1013,9 @@ static inline bool unit_has_job_type(Unit *u, JobType type) {
         return u && u->job && u->job->type == type;
 }
 
-static inline int unit_get_log_level_max(const Unit *u) {
-        if (u) {
-                if (u->debug_invocation)
-                        return LOG_DEBUG;
+int unit_get_log_level_max(const Unit *u);
 
-                ExecContext *ec = unit_get_exec_context(u);
-                if (ec && ec->log_level_max >= 0)
-                        return ec->log_level_max;
-        }
-
-        return log_get_max_level();
-}
-
-static inline bool unit_log_level_test(const Unit *u, int level) {
-        assert(u);
-        return LOG_PRI(level) <= unit_get_log_level_max(u);
-}
+bool unit_log_level_test(const Unit *u, int level);
 
 /* unit_log_skip is for cases like ExecCondition= where a unit is considered "done"
  * after some execution, rather than succeeded or failed. */
