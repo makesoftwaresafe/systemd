@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <errno.h>
 #include <unistd.h>
 
+#include "sd-bus.h"
 #include "sd-id128.h"
 
 #include "alloc-util.h"
@@ -11,6 +11,7 @@
 #include "bus-get-properties.h"
 #include "bus-locator.h"
 #include "bus-message-util.h"
+#include "bus-object.h"
 #include "bus-polkit.h"
 #include "bus-util.h"
 #include "cgroup-util.h"
@@ -19,6 +20,7 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "format-util.h"
+#include "hashmap.h"
 #include "hostname-util.h"
 #include "image.h"
 #include "image-dbus.h"
@@ -30,10 +32,9 @@
 #include "operation.h"
 #include "os-util.h"
 #include "path-util.h"
-#include "process-util.h"
-#include "stdio-util.h"
+#include "string-util.h"
 #include "strv.h"
-#include "unit-name.h"
+#include "unit-def.h"
 #include "user-util.h"
 
 static BUS_DEFINE_PROPERTY_GET_GLOBAL(property_get_pool_path, "s", "/var/lib/machines");
@@ -283,7 +284,7 @@ static int method_create_or_register_machine(
         if (leader == 1)
                 return sd_bus_error_set(error, SD_BUS_ERROR_INVALID_ARGS, "Invalid leader PID");
 
-        if (!isempty(root_directory) && !path_is_absolute(root_directory))
+        if (!isempty(root_directory) && (!path_is_absolute(root_directory) || !path_is_valid(root_directory)))
                 return sd_bus_error_set(error, SD_BUS_ERROR_INVALID_ARGS, "Root directory must be empty or an absolute path");
 
         if (leader == 0) {
@@ -1261,7 +1262,7 @@ int manager_kill_unit(Manager *manager, const char *unit, int signo, sd_bus_erro
         return bus_call_method(manager->bus, bus_systemd_mgr, "KillUnit", error, NULL, "ssi", unit, "all", signo);
 }
 
-int manager_unit_is_active(Manager *manager, const char *unit) {
+int manager_unit_is_active(Manager *manager, const char *unit, sd_bus_error *reterr_error) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
         _cleanup_free_ char *path = NULL;
@@ -1293,6 +1294,7 @@ int manager_unit_is_active(Manager *manager, const char *unit) {
                                                    BUS_ERROR_LOAD_FAILED))
                         return false;
 
+                sd_bus_error_move(reterr_error, &error);
                 return r;
         }
 
@@ -1303,7 +1305,7 @@ int manager_unit_is_active(Manager *manager, const char *unit) {
         return !STR_IN_SET(state, "inactive", "failed");
 }
 
-int manager_job_is_active(Manager *manager, const char *path) {
+int manager_job_is_active(Manager *manager, const char *path, sd_bus_error *reterr_error) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
         int r;
@@ -1328,6 +1330,7 @@ int manager_job_is_active(Manager *manager, const char *path) {
                 if (sd_bus_error_has_name(&error, SD_BUS_ERROR_UNKNOWN_OBJECT))
                         return false;
 
+                sd_bus_error_move(reterr_error, &error);
                 return r;
         }
 

@@ -4,10 +4,6 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 
-#if HAVE_AUDIT
-#  include <libaudit.h>
-#endif
-
 #include "alloc-util.h"
 #include "build.h"
 #include "chase.h"
@@ -25,6 +21,7 @@
 #include "fs-util.h"
 #include "hashmap.h"
 #include "image-policy.h"
+#include "label-util.h"
 #include "libaudit-util.h"
 #include "libcrypt-util.h"
 #include "log.h"

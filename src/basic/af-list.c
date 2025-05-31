@@ -1,17 +1,15 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <errno.h>
 #include <string.h>
 #include <sys/socket.h>
 
 #include "af-list.h"
-#include "macro.h"
 #include "string-util.h"
 
 static const struct af_name* lookup_af(register const char *str, register GPERF_LEN_TYPE len);
 
-#include "af-from-name.h"
-#include "af-to-name.h"
+#include "af-from-name.inc"
+#include "af-to-name.inc"
 
 const char* af_to_name(int id) {
 

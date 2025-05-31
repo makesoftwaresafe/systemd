@@ -5028,40 +5028,87 @@ class NetworkdNetworkTests(unittest.TestCase, Utilities):
         self.assertIn('default via fe80::f0ca:cc1a proto static metric 1 pref medium', output)
 
     def test_keep_configuration_on_restart(self):
+        copy_network_unit('12-dummy.netdev', '85-static-ipv6.network', '85-unmanaged.link')
+
         # Add an unmanaged interface with an up address
         call('ip link add unmanaged0 type dummy')
         call('ip link set unmanaged0 up')
+        call('ip -4 addr add 10.20.30.40/32 dev unmanaged0')
         call('ip -6 addr add 2001:db8:9999:f101::15/64 dev unmanaged0')
+
+        # Start `ip monitor` with output to a temporary file
+        with tempfile.TemporaryFile(mode='r+', prefix='ip_monitor_u') as logfile_unmanaged:
+            process_u = subprocess.Popen(['ip', 'monitor', 'dev', 'unmanaged0'], stdout=logfile_unmanaged, text=True)
+
+            start_networkd()
+            self.check_keep_configuration_on_restart()
+
+            # Start `ip monitor` with output to a temporary file
+            with tempfile.TemporaryFile(mode='r+', prefix='ip_monitor') as logfile:
+                process = subprocess.Popen(['ip', 'monitor', 'dev', 'dummy98'], stdout=logfile, text=True)
+
+                restart_networkd()
+                self.check_keep_configuration_on_restart()
+
+                process.send_signal(signal.SIGTERM)
+                process.wait()
+
+                print('### ip monitor dev dummy98 BEGIN')
+
+                # Read the `ip monitor` output looking for network changes
+                logfile.seek(0)
+                for line in logfile:
+                    line = line.rstrip()
+                    print(line)
+                    # Check if a link went down
+                    self.assertNotRegex(line, 'dummy98: .* state DOWN')
+                    # Check if an address was removed
+                    self.assertNotRegex(line, '^Deleted .* 2001:db8:')
+                    self.assertNotRegex(line, '^Deleted 2001:db8:.*/64')
+                    # Check if the default route was removed
+                    self.assertNotRegex(line, '^Deleted default via fe80::f0ca:cc1a')
+
+            print('### ip monitor dev dummy98 END')
+
+            process_u.send_signal(signal.SIGTERM)
+            process_u.wait()
+
+            print('### ip monitor dev unmanaged0 BEGIN')
+
+            # Read the `ip monitor` output looking for network changes
+            logfile_unmanaged.seek(0)
+            for line in logfile_unmanaged:
+                line = line.rstrip()
+                print(line)
+                # Check if something happened
+                self.assertEqual(line, '')
+
+        print('### ip monitor dev unmanaged0 END')
+
+    def test_keep_untracked_addresses(self):
+        # Add an unmanaged interface with an up address
 
         copy_network_unit('12-dummy.netdev', '85-static-ipv6.network')
         start_networkd()
-        self.check_keep_configuration_on_restart()
+        self.wait_online('dummy98:routable')
 
-        # Start `ip monitor` with output to a temporary file
-        with tempfile.TemporaryFile(mode='r+', prefix='ip_monitor') as logfile:
-            process = subprocess.Popen(['ip', 'monitor', 'dev', 'dummy98'], stdout=logfile, text=True)
-            restart_networkd()
-            self.check_keep_configuration_on_restart()
+        print('### ip -4 addr add 10.234.77.111/32 dev dummy98')
+        output = check_output('ip -4 addr add 10.234.77.111/32 dev dummy98')
+        print(output)
 
-            process.send_signal(signal.SIGTERM)
-            process.wait()
+        print('### ip -6 addr add 2222:3333::4444/64 dev dummy98')
+        output = check_output('ip -6 addr add 2222:3333::4444/64 dev dummy98')
+        print(output)
 
-            print('### ip monitor dev dummy98 BEGIN')
+        restart_networkd()
 
-            # Read the `ip monitor` output looking for network changes
-            logfile.seek(0)
-            for line in logfile:
-                print(line, end="")
-                # Check if a link went down
-                self.assertNotRegex(line, 'unmanaged0: .* state DOWN')
-                self.assertNotRegex(line, 'dummy98: .* state DOWN')
-                # Check if an address was removed
-                self.assertNotRegex(line, '^Deleted .* 2001:db8:')
-                self.assertNotRegex(line, '^Deleted 2001:db8:.*/64')
-                # Check if the default route was removed
-                self.assertNotRegex(line, '^Deleted default via fe80::f0ca:cc1a')
+        output = check_output('ip -4 addr show dev dummy98')
+        print(output)
+        self.assertIn('inet 10.234.77.111/32', output)
 
-            print('### ip monitor dev dummy98 END')
+        output = check_output('ip -6 addr show dev dummy98')
+        print(output)
+        self.assertIn('inet6 2222:3333::4444/64 scope global', output)
 
     def check_nexthop(self, manage_foreign_nexthops, first):
         self.wait_online('veth99:routable', 'veth-peer:routable', 'dummy98:routable')
@@ -5556,7 +5603,7 @@ class NetworkdTCTests(unittest.TestCase, Utilities):
         output = check_output('tc qdisc show dev dummy98')
         print(output)
         self.assertRegex(output, 'qdisc tbf 35: root')
-        self.assertRegex(output, 'rate 1Gbit burst 5000b peakrate 100Gbit minburst 987500b lat 70(.0)?ms')
+        self.assertRegex(output, 'rate 1Gbit burst 5000b peakrate 100Gbit minburst (987500b|999200b) lat 70(.0)?ms')
 
     @expectedFailureIfModuleIsNotAvailable('sch_teql')
     def test_qdisc_teql(self):
@@ -5727,6 +5774,21 @@ class NetworkdBondTests(unittest.TestCase, Utilities):
         output = check_output('ip -d link show dummy98')
         print(output)
         self.assertRegex(output, 'master bond199')
+
+        # Test case for #37629
+        for _ in range(3):
+            # When a slave leaved from its master bonding interface, the kernel brings down the slave.
+            check_output('ip link set dummy98 nomaster')
+            self.wait_online('dummy98:off')
+
+            # Bring up the interface to check if networkd recognizes the interface has no master now.
+            check_output('ip link set dummy98 up')
+            self.wait_online('dummy98:carrier')
+
+            # We need to first bring down the interface to make it join a bonding interface.
+            check_output('ip link set dummy98 down')
+            check_output('ip link set dummy98 master bond199')
+            self.wait_online('dummy98:enslaved')
 
     def test_bond_active_slave(self):
         copy_network_unit('23-active-slave.network', '23-bond199.network', '25-bond-active-backup-slave.netdev', '12-dummy.netdev')

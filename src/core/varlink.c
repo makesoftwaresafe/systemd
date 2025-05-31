@@ -2,22 +2,27 @@
 
 #include "sd-varlink.h"
 
+#include "constants.h"
 #include "dynamic-user.h"
-#include "format-util.h"
+#include "errno-util.h"
 #include "json-util.h"
 #include "manager.h"
-#include "manager-varlink.h"
-#include "mkdir-label.h"
+#include "path-util.h"
+#include "pidref.h"
+#include "string-util.h"
 #include "strv.h"
 #include "unit.h"
 #include "user-util.h"
 #include "varlink.h"
 #include "varlink-internal.h"
-#include "varlink-io.systemd.Manager.h"
 #include "varlink-io.systemd.ManagedOOM.h"
+#include "varlink-io.systemd.Manager.h"
+#include "varlink-io.systemd.Unit.h"
 #include "varlink-io.systemd.UserDatabase.h"
 #include "varlink-io.systemd.service.h"
+#include "varlink-manager.h"
 #include "varlink-serialize.h"
+#include "varlink-unit.h"
 #include "varlink-util.h"
 
 typedef struct LookupParameters {
@@ -608,6 +613,7 @@ int manager_setup_varlink_server(Manager *m) {
         r = sd_varlink_server_add_interface_many(
                         s,
                         &vl_interface_io_systemd_Manager,
+                        &vl_interface_io_systemd_Unit,
                         &vl_interface_io_systemd_service);
         if (r < 0)
                 return log_debug_errno(r, "Failed to add interfaces to varlink server: %m");
@@ -615,6 +621,7 @@ int manager_setup_varlink_server(Manager *m) {
         r = sd_varlink_server_bind_method_many(
                         s,
                         "io.systemd.Manager.Describe", vl_method_describe_manager,
+                        "io.systemd.Unit.List", vl_method_list_units,
                         "io.systemd.service.Ping", varlink_method_ping,
                         "io.systemd.service.GetEnvironment", varlink_method_get_environment);
         if (r < 0)

@@ -115,15 +115,23 @@ Deprecations and removals:
   That requires distros to enable CONFIG_ACPI_FPDT, and have kernels v5.12 for
   x86 and v6.2 for arm.
 
-* Once baseline is 4.13, remove support for INTERFACE_OLD= checks in "udevadm
-  trigger"'s waiting logic, since we can then rely on uuid-tagged uevents
-
 * In v260: remove support for deprecated FactoryReset EFI variable in
   systemd-repart, replaced by FactoryResetRequest.
 
 * Consider removing root=gpt-auto, and push people to use root=dissect instead.
 
 Features:
+
+* maybe introduce a new per-unit drop-in directory .confext.d/ that may contain
+  symlinks to confext images to enable for the unit.
+
+* nspawn: map foreign UID range through 1:1
+
+* replace most calls to sd_bus_send() by sd_bus_message_send()
+
+* replace all uses of fopen_temporary() by fopen_tmpfile_linkable() +
+  flink_tmpfile() and then get rid of fopen_temporary(). Benefit: use O_TMPFILE
+  pervasively, and avoid rename() wherever we can.
 
 * loginctl: show argv[] of "leader" process in tabular list-sessions output
 

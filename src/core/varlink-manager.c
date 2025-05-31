@@ -2,15 +2,21 @@
 
 #include <sys/prctl.h>
 
+#include "sd-varlink.h"
+
+#include "alloc-util.h"
+#include "architecture.h"
 #include "build.h"
 #include "confidential-virt.h"
 #include "json-util.h"
-#include "manager-varlink.h"
 #include "manager.h"
+#include "set.h"
+#include "strv.h"
 #include "syslog-util.h"
 #include "taint.h"
 #include "version.h"
 #include "varlink-common.h"
+#include "varlink-manager.h"
 #include "virt.h"
 #include "watchdog.h"
 
@@ -41,7 +47,8 @@ static int manager_context_build_json(sd_json_variant **ret, const char *name, v
         if (!taints)
                 return -ENOMEM;
 
-        return sd_json_buildo(ASSERT_PTR(ret),
+        return sd_json_buildo(
+                        ASSERT_PTR(ret),
                         SD_JSON_BUILD_PAIR_STRING("Version", GIT_VERSION),
                         SD_JSON_BUILD_PAIR_STRING("Architecture", architecture_to_string(uname_architecture())),
                         SD_JSON_BUILD_PAIR_STRING("Features", systemd_features),
@@ -103,7 +110,8 @@ static int manager_runtime_build_json(sd_json_variant **ret, const char *name, v
         Manager *m = ASSERT_PTR(userdata);
         dual_timestamp watchdog_last_ping;
 
-        return sd_json_buildo(ASSERT_PTR(ret),
+        return sd_json_buildo(
+                ASSERT_PTR(ret),
                 SD_JSON_BUILD_PAIR_STRING("Virtualization", virtualization_to_string(detect_virtualization())),
                 SD_JSON_BUILD_PAIR_STRING("ConfidentialVirtualization", confidential_virtualization_to_string(detect_confidential_virtualization())),
                 JSON_BUILD_PAIR_STRING_NON_EMPTY("ConfirmSpawn", manager_get_confirm_spawn(m)),
@@ -160,9 +168,10 @@ int vl_method_describe_manager(sd_varlink *link, sd_json_variant *parameters, sd
         if (r != 0)
                 return r;
 
-        r = sd_json_buildo(&v,
-                        SD_JSON_BUILD_PAIR_CALLBACK("Context", manager_context_build_json, manager),
-                        SD_JSON_BUILD_PAIR_CALLBACK("Runtime", manager_runtime_build_json, manager));
+        r = sd_json_buildo(
+                        &v,
+                        SD_JSON_BUILD_PAIR_CALLBACK("context", manager_context_build_json, manager),
+                        SD_JSON_BUILD_PAIR_CALLBACK("runtime", manager_runtime_build_json, manager));
         if (r < 0)
                 return log_error_errno(r, "Failed to build manager JSON data: %m");
 

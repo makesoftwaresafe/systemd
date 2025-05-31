@@ -2,9 +2,7 @@
 
 #include <fcntl.h>
 #include <sys/file.h>
-#include <sys/prctl.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
 #include "alloc-util.h"
 #include "blockdev-util.h"
@@ -72,8 +70,7 @@ static int run(int argc, char *argv[]) {
                                label,
                                /* root = */ NULL,
                                uuid,
-                               /* discard = */ true,
-                               /* quiet = */ true,
+                               MKFS_DISCARD | MKFS_QUIET,
                                /* sector_size = */ 0,
                                /* compression = */ NULL,
                                /* compression_level = */ NULL,

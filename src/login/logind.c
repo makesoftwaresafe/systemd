@@ -1,46 +1,43 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <errno.h>
 #include <fcntl.h>
-#include <sys/types.h>
 #include <unistd.h>
 
+#include "sd-bus.h"
 #include "sd-daemon.h"
 #include "sd-device.h"
+#include "sd-event.h"
 
 #include "alloc-util.h"
-#include "bus-error.h"
 #include "bus-locator.h"
 #include "bus-log-control-api.h"
-#include "bus-polkit.h"
-#include "cgroup-util.h"
+#include "bus-object.h"
 #include "common-signal.h"
-#include "constants.h"
 #include "daemon-util.h"
 #include "device-util.h"
 #include "devnum-util.h"
 #include "dirent-util.h"
+#include "errno-util.h"
 #include "escape.h"
 #include "fd-util.h"
 #include "format-util.h"
 #include "fs-util.h"
+#include "hashmap.h"
+#include "label-util.h"
+#include "logind-session.h"
 #include "logind.h"
 #include "logind-button.h"
 #include "logind-dbus.h"
 #include "logind-device.h"
 #include "logind-seat.h"
-#include "logind-seat-dbus.h"
-#include "logind-session-dbus.h"
 #include "logind-session-device.h"
 #include "logind-user.h"
-#include "logind-user-dbus.h"
 #include "logind-utmp.h"
 #include "logind-varlink.h"
 #include "main-func.h"
 #include "mkdir-label.h"
 #include "parse-util.h"
 #include "process-util.h"
-#include "selinux-util.h"
 #include "service-util.h"
 #include "signal-util.h"
 #include "strv.h"
@@ -96,7 +93,7 @@ static int manager_new(Manager **ret) {
         if (r < 0)
                 return r;
 
-        r = sd_event_add_signal(m->event, /* ret_event_source= */ NULL, (SIGRTMIN+18)|SD_EVENT_SIGNAL_PROCMASK, sigrtmin18_handler, /* userdata= */ NULL);
+        r = sd_event_add_signal(m->event, /* ret= */ NULL, (SIGRTMIN+18)|SD_EVENT_SIGNAL_PROCMASK, sigrtmin18_handler, /* userdata= */ NULL);
         if (r < 0)
                 return r;
 
@@ -155,6 +152,7 @@ static Manager* manager_free(Manager *m) {
         sd_device_monitor_unref(m->device_monitor);
         sd_device_monitor_unref(m->device_vcsa_monitor);
         sd_device_monitor_unref(m->device_button_monitor);
+        sd_device_monitor_unref(m->device_uaccess_monitor);
 
         if (m->unlink_nologin)
                 (void) unlink_or_warn("/run/nologin");
@@ -658,6 +656,35 @@ static int manager_dispatch_device_udev(sd_device_monitor *monitor, sd_device *d
         return 0;
 }
 
+static int manager_dispatch_uaccess_udev(sd_device_monitor *monitor, sd_device *device, void *userdata) {
+        Manager *m = ASSERT_PTR(userdata);
+        int r;
+
+        assert(device);
+
+        /* If the device currently has "master-of-seat" tag, then it has been or will be processed by
+         * manager_dispatch_seat_udev(). */
+        r = sd_device_has_current_tag(device, "master-of-seat");
+        if (r < 0)
+                log_device_warning_errno(device, r, "Failed to check if the device currently has master-of-seat tag, ignoring: %m");
+        if (r != 0)
+                return 0;
+
+        /* If the device is in input, graphics, or drm, then the event has been or will be processed by
+         * manager_dispatch_device_udev(). */
+        r = device_in_subsystem(device, "input", "graphics", "drm");
+        if (r < 0)
+                log_device_warning_errno(device, r, "Failed to check device subsystem, ignoring: %m");
+        if (r != 0)
+                return 0;
+
+        r = manager_process_device_triggered_by_seat(m, device);
+        if (r < 0)
+                log_device_warning_errno(device, r, "Failed to process seat device event triggered by us, ignoring: %m");
+
+        return 0;
+}
+
 static int manager_dispatch_vcsa_udev(sd_device_monitor *monitor, sd_device *device, void *userdata) {
         Manager *m = ASSERT_PTR(userdata);
         int r;
@@ -883,7 +910,7 @@ static int manager_connect_console(Manager *m) {
 
         assert_se(ignore_signals(SIGRTMIN + 1) >= 0);
 
-        r = sd_event_add_signal(m->event, /* ret_event_source= */ NULL, (SIGRTMIN + 0) | SD_EVENT_SIGNAL_PROCMASK, manager_vt_switch, m);
+        r = sd_event_add_signal(m->event, /* ret= */ NULL, (SIGRTMIN + 0) | SD_EVENT_SIGNAL_PROCMASK, manager_vt_switch, m);
         if (r < 0)
                 return log_error_errno(r, "Failed to subscribe to SIGRTMIN+0 signal: %m");
 
@@ -896,6 +923,7 @@ static int manager_connect_udev(Manager *m) {
         assert(m);
         assert(!m->device_seat_monitor);
         assert(!m->device_monitor);
+        assert(!m->device_uaccess_monitor);
         assert(!m->device_vcsa_monitor);
         assert(!m->device_button_monitor);
 
@@ -936,6 +964,24 @@ static int manager_connect_udev(Manager *m) {
                 return r;
 
         (void) sd_device_monitor_set_description(m->device_monitor, "input,graphics,drm");
+
+        r = sd_device_monitor_new(&m->device_uaccess_monitor);
+        if (r < 0)
+                return r;
+
+        r = sd_device_monitor_filter_add_match_tag(m->device_uaccess_monitor, "uaccess");
+        if (r < 0)
+                return r;
+
+        r = sd_device_monitor_attach_event(m->device_uaccess_monitor, m->event);
+        if (r < 0)
+                return r;
+
+        r = sd_device_monitor_start(m->device_uaccess_monitor, manager_dispatch_uaccess_udev, m);
+        if (r < 0)
+                return r;
+
+        (void) sd_device_monitor_set_description(m->device_uaccess_monitor, "uaccess");
 
         /* Don't watch keys if nobody cares */
         if (!manager_all_buttons_ignored(m)) {
@@ -1134,7 +1180,7 @@ static int manager_startup(Manager *m) {
 
         assert(m);
 
-        r = sd_event_add_signal(m->event, /* ret_event_source= */ NULL, SIGHUP|SD_EVENT_SIGNAL_PROCMASK, manager_dispatch_reload_signal, m);
+        r = sd_event_add_signal(m->event, /* ret= */ NULL, SIGHUP|SD_EVENT_SIGNAL_PROCMASK, manager_dispatch_reload_signal, m);
         if (r < 0)
                 return log_error_errno(r, "Failed to register SIGHUP handler: %m");
 

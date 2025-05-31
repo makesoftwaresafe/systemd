@@ -51,6 +51,8 @@ shared_sources = files(
         'coredump-util.c',
         'cpu-set-util.c',
         'creds-util.c',
+        'cryptsetup-fido2.c',
+        'cryptsetup-tpm2.c',
         'cryptsetup-util.c',
         'daemon-util.c',
         'data-fd-util.c',
@@ -160,6 +162,7 @@ shared_sources = files(
         'resize-fs.c',
         'resolve-util.c',
         'rm-rf.c',
+        'seccomp-util.c',
         'securebits-util.c',
         'selinux-util.c',
         'serialize.c',
@@ -204,6 +207,7 @@ shared_sources = files(
         'varlink-io.systemd.Resolve.c',
         'varlink-io.systemd.Resolve.Monitor.c',
         'varlink-io.systemd.Udev.c',
+        'varlink-io.systemd.Unit.c',
         'varlink-io.systemd.UserDatabase.c',
         'varlink-io.systemd.oom.c',
         'varlink-io.systemd.service.c',
@@ -227,8 +231,8 @@ if get_option('tests') != 'false'
 endif
 
 generate_syscall_list = find_program('generate-syscall-list.py')
-fname = 'syscall-list.h'
-syscall_list_h = custom_target(
+fname = 'syscall-list.inc'
+syscall_list_inc = custom_target(
         fname,
         input : syscall_list_txt,
         output : fname,
@@ -236,15 +240,11 @@ syscall_list_h = custom_target(
                    '@INPUT@'],
         capture : true)
 
-generated_sources += syscall_list_h
+generated_sources += syscall_list_inc
+shared_sources += syscall_list_inc
 
 if conf.get('ENABLE_UTMP') == 1
         shared_sources += files('utmp-wtmp.c')
-endif
-
-if conf.get('HAVE_SECCOMP') == 1
-        shared_sources += files('seccomp-util.c')
-        shared_sources += syscall_list_h
 endif
 
 if conf.get('HAVE_LIBIPTC') == 1
@@ -257,14 +257,6 @@ endif
 
 if conf.get('HAVE_PAM') == 1
         shared_sources += files('pam-util.c')
-endif
-
-if conf.get('HAVE_LIBFIDO2') == 1 and conf.get('HAVE_LIBCRYPTSETUP') == 1
-        shared_sources += files('cryptsetup-fido2.c')
-endif
-
-if conf.get('HAVE_TPM2') == 1 and conf.get('HAVE_LIBCRYPTSETUP') == 1
-        shared_sources += files('cryptsetup-tpm2.c')
 endif
 
 generate_ip_protocol_list = find_program('generate-ip-protocol-list.sh')
@@ -282,7 +274,7 @@ gperf_file = custom_target(
         command : [generate_gperfs, 'ip_protocol', 'IPPROTO_', '@INPUT@', '<netinet/in.h>'],
         capture : true)
 
-fname = 'ip-protocol-from-name.h'
+fname = 'ip-protocol-from-name.inc'
 target1 = custom_target(
         fname,
         input : gperf_file,
@@ -295,7 +287,7 @@ target1 = custom_target(
                    '@INPUT@'],
         capture : true)
 
-fname = 'ip-protocol-to-name.h'
+fname = 'ip-protocol-to-name.inc'
 awkscript = 'ip-protocol-to-name.awk'
 target2 = custom_target(
         fname,
@@ -307,16 +299,17 @@ target2 = custom_target(
 generated_sources += [target1, target2]
 shared_sources += [target1, target2]
 
-fname = 'ethtool-link-mode.h'
-ethtool_link_mode_h = custom_target(
+fname = 'ethtool-link-mode.inc'
+ethtool_link_mode_inc = custom_target(
         fname,
         input : ['ethtool-link-mode.py', '../basic/include/linux/ethtool.h'],
         output : fname,
         command : [python, '@INPUT0@', '--header', cpp, '@INPUT1@'],
         capture : true)
 
-generated_sources += ethtool_link_mode_h
-shared_sources += ethtool_link_mode_h
+generated_sources += ethtool_link_mode_inc
+shared_sources += ethtool_link_mode_inc
+sources += shared_sources
 
 fname = 'ethtool-link-mode.xml'
 ethtool_link_mode_xml = custom_target(

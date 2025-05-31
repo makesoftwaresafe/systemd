@@ -14,13 +14,13 @@ systemd_shutdown_extract_sources = files(
 executables += [
         libexec_template + {
                 'name' : 'systemd-shutdown',
-                'sources' : [systemd_shutdown_sources, systemd_shutdown_extract_sources],
+                'sources' : systemd_shutdown_sources + systemd_shutdown_extract_sources,
                 'extract' : systemd_shutdown_extract_sources,
                 'dependencies' : libmount,
         },
         libexec_template + {
                 'name' : 'systemd-shutdown.standalone',
-                'sources' : [systemd_shutdown_sources, systemd_shutdown_extract_sources],
+                'sources' : systemd_shutdown_sources + systemd_shutdown_extract_sources,
                 'c_args' : '-DSTANDALONE',
                 'link_with' : [
                         libbasic_static,
@@ -28,8 +28,6 @@ executables += [
                         libsystemd_static,
                 ],
                 'dependencies' : libmount,
-                'build_by_default' : have_standalone_binaries,
-                'install' : have_standalone_binaries,
         },
         test_template + {
                 'sources' : files('test-umount.c'),

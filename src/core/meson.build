@@ -43,7 +43,6 @@ libcore_sources = files(
         'load-fragment.c',
         'manager-dump.c',
         'manager-serialize.c',
-        'manager-varlink.c',
         'manager.c',
         'mount.c',
         'namespace.c',
@@ -65,6 +64,8 @@ libcore_sources = files(
         'unit.c',
         'varlink.c',
         'varlink-common.c',
+        'varlink-manager.c',
+        'varlink-unit.c',
 )
 
 subdir('bpf/socket_bind')
@@ -77,6 +78,8 @@ if conf.get('BPF_FRAMEWORK') == 1
                 restrict_fs_skel_h,
                 restrict_ifaces_skel_h]
 endif
+
+sources += libcore_sources
 
 load_fragment_gperf_gperf = custom_target(
         'load-fragment-gperf.gperf',

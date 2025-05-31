@@ -1,12 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#if HAVE_VALGRIND_MEMCHECK_H
-#include <valgrind/memcheck.h>
-#endif
-
 #include <fcntl.h>
 #include <getopt.h>
-#include <linux/loop.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -26,6 +21,7 @@
 #include "conf-files.h"
 #include "conf-parser.h"
 #include "constants.h"
+#include "copy.h"
 #include "cryptsetup-util.h"
 #include "device-util.h"
 #include "devnum-util.h"
@@ -80,7 +76,6 @@
 #include "tmpfile-util.h"
 #include "tpm2-pcr.h"
 #include "tpm2-util.h"
-#include "user-util.h"
 #include "utf8.h"
 #include "xattr-util.h"
 
@@ -111,6 +106,9 @@
 
 #define APIVFS_TMP_DIRS_NULSTR "proc\0sys\0dev\0tmp\0run\0var/tmp\0"
 
+#define AUTOMATIC_FSTAB_HEADER_START "# Start section ↓ of automatically generated fstab by systemd-repart"
+#define AUTOMATIC_FSTAB_HEADER_END   "# End section ↑ of automatically generated fstab by systemd-repart"
+
 /* Note: When growing and placing new partitions we always align to 4K sector size. It's how newer hard disks
  * are designed, and if everything is aligned to that performance is best. And for older hard disks with 512B
  * sector size devices were generally assumed to have an even number of sectors, hence at the worst we'll
@@ -134,6 +132,14 @@ typedef enum FilterPartitionType {
         _FILTER_PARTITIONS_MAX,
         _FILTER_PARTITIONS_INVALID = -EINVAL,
 } FilterPartitionsType;
+
+typedef enum AppendMode {
+        APPEND_NO,
+        APPEND_AUTO,
+        APPEND_REPLACE,
+        _APPEND_MODE_MAX,
+        _APPEND_MODE_INVALID = -EINVAL,
+} AppendMode;
 
 static EmptyMode arg_empty = EMPTY_UNSET;
 static bool arg_dry_run = true;
@@ -181,6 +187,7 @@ static int arg_offline = -1;
 static char **arg_copy_from = NULL;
 static char *arg_copy_source = NULL;
 static char *arg_make_ddi = NULL;
+static AppendMode arg_append_fstab = APPEND_NO;
 static char *arg_generate_fstab = NULL;
 static char *arg_generate_crypttab = NULL;
 static Set *arg_verity_settings = NULL;
@@ -268,6 +275,23 @@ static PartitionEncryptedVolume* partition_encrypted_volume_free(PartitionEncryp
         free(c->options);
 
         return mfree(c);
+}
+
+typedef struct CopyFiles {
+        char *source;
+        char *target;
+        CopyFlags flags;
+} CopyFiles;
+
+static void copy_files_free_many(CopyFiles *f, size_t n) {
+        assert(f || n == 0);
+
+        FOREACH_ARRAY(i, f, n) {
+                free(i->source);
+                free(i->target);
+        }
+
+        free(f);
 }
 
 typedef enum SubvolumeFlags {
@@ -370,7 +394,6 @@ typedef struct Partition {
         uint64_t copy_blocks_done;
 
         char *format;
-        char **copy_files;
         char **exclude_files_source;
         char **exclude_files_target;
         char **make_directories;
@@ -387,6 +410,8 @@ typedef struct Partition {
         char *compression_level;
 
         int add_validatefs;
+        CopyFiles *copy_files;
+        size_t n_copy_files;
 
         uint64_t gpt_flags;
         int no_auto;
@@ -455,6 +480,12 @@ static const char *empty_mode_table[_EMPTY_MODE_MAX] = {
         [EMPTY_CREATE]  = "create",
 };
 
+static const char *append_mode_table[_APPEND_MODE_MAX] = {
+        [APPEND_NO]      = "no",
+        [APPEND_AUTO]    = "auto",
+        [APPEND_REPLACE] = "replace",
+};
+
 static const char *encrypt_mode_table[_ENCRYPT_MODE_MAX] = {
         [ENCRYPT_OFF] = "off",
         [ENCRYPT_KEY_FILE] = "key-file",
@@ -476,6 +507,7 @@ static const char *minimize_mode_table[_MINIMIZE_MODE_MAX] = {
 };
 
 DEFINE_PRIVATE_STRING_TABLE_LOOKUP(empty_mode, EmptyMode);
+DEFINE_PRIVATE_STRING_TABLE_LOOKUP(append_mode, AppendMode);
 DEFINE_PRIVATE_STRING_TABLE_LOOKUP_FROM_STRING_WITH_BOOLEAN(encrypt_mode, EncryptMode, ENCRYPT_KEY_FILE);
 DEFINE_PRIVATE_STRING_TABLE_LOOKUP(verity_mode, VerityMode);
 DEFINE_PRIVATE_STRING_TABLE_LOOKUP_FROM_STRING_WITH_BOOLEAN(minimize_mode, MinimizeMode, MINIMIZE_BEST);
@@ -619,7 +651,6 @@ static Partition* partition_free(Partition *p) {
         safe_close(p->copy_blocks_fd);
 
         free(p->format);
-        strv_free(p->copy_files);
         strv_free(p->exclude_files_source);
         strv_free(p->exclude_files_target);
         strv_free(p->make_directories);
@@ -630,11 +661,12 @@ static Partition* partition_free(Partition *p) {
         free(p->compression);
         free(p->compression_level);
 
+        copy_files_free_many(p->copy_files, p->n_copy_files);
+
         iovec_done(&p->roothash);
 
         free(p->split_name_format);
         unlink_and_free(p->split_path);
-
         partition_mountpoint_free_many(p->mountpoints, p->n_mountpoints);
         p->mountpoints = NULL;
         p->n_mountpoints = 0;
@@ -660,7 +692,6 @@ static void partition_foreignize(Partition *p) {
         p->copy_blocks_root = NULL;
 
         p->format = mfree(p->format);
-        p->copy_files = strv_free(p->copy_files);
         p->exclude_files_source = strv_free(p->exclude_files_source);
         p->exclude_files_target = strv_free(p->exclude_files_target);
         p->make_directories = strv_free(p->make_directories);
@@ -670,6 +701,10 @@ static void partition_foreignize(Partition *p) {
         p->verity_match_key = mfree(p->verity_match_key);
         p->compression = mfree(p->compression);
         p->compression_level = mfree(p->compression_level);
+
+        copy_files_free_many(p->copy_files, p->n_copy_files);
+        p->copy_files = NULL;
+        p->n_copy_files = 0;
 
         p->priority = 0;
         p->weight = 1000;
@@ -1735,9 +1770,9 @@ static int config_parse_copy_files(
                 void *data,
                 void *userdata) {
 
-        _cleanup_free_ char *source = NULL, *buffer = NULL, *resolved_source = NULL, *resolved_target = NULL;
+        _cleanup_free_ char *source = NULL, *buffer = NULL, *resolved_source = NULL, *resolved_target = NULL, *options = NULL;
+        Partition *partition = ASSERT_PTR(data);
         const char *p = rvalue, *target;
-        char ***copy_files = ASSERT_PTR(data);
         int r;
 
         assert(rvalue);
@@ -1758,8 +1793,37 @@ static int config_parse_copy_files(
         else
                 target = buffer;
 
+        r = extract_first_word(&p, &options, ":", EXTRACT_CUNESCAPE|EXTRACT_DONT_COALESCE_SEPARATORS);
+        if (r < 0)
+                return log_syntax(unit, LOG_ERR, filename, line, r, "Failed to extract options: %s", rvalue);
+
         if (!isempty(p))
                 return log_syntax(unit, LOG_ERR, filename, line, SYNTHETIC_ERRNO(EINVAL), "Too many arguments: %s", rvalue);
+
+        CopyFlags flags = COPY_REFLINK|COPY_HOLES|COPY_MERGE|COPY_REPLACE|COPY_SIGINT|COPY_HARDLINKS|COPY_ALL_XATTRS|COPY_GRACEFUL_WARN|COPY_TRUNCATE|COPY_RESTORE_DIRECTORY_TIMESTAMPS;
+        for (const char *opts = options;;) {
+                _cleanup_free_ char *word = NULL;
+                const char *val;
+
+                r = extract_first_word(&opts, &word, ",", EXTRACT_DONT_COALESCE_SEPARATORS | EXTRACT_UNESCAPE_SEPARATORS);
+                if (r < 0)
+                        return log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse CopyFile options: %s", options);
+                if (r == 0)
+                        break;
+
+                if (isempty(word))
+                        continue;
+
+                if ((val = startswith(word, "fsverity="))) {
+                        if (streq(val, "copy"))
+                                flags |= COPY_PRESERVE_FS_VERITY;
+                        else if (streq(val, "off"))
+                                flags &= ~COPY_PRESERVE_FS_VERITY;
+                        else
+                                log_syntax(unit, LOG_WARNING, filename, line, 0, "fsverity= expects either 'off' or 'copy'.");
+                } else
+                        log_syntax(unit, LOG_WARNING, filename, line, 0, "Encountered unknown option '%s', ignoring.", word);
+        }
 
         r = specifier_printf(source, PATH_MAX-1, system_and_tmp_specifier_table, arg_root, NULL, &resolved_source);
         if (r < 0) {
@@ -1783,9 +1847,14 @@ static int config_parse_copy_files(
         if (r < 0)
                 return 0;
 
-        r = strv_consume_pair(copy_files, TAKE_PTR(resolved_source), TAKE_PTR(resolved_target));
-        if (r < 0)
+        if (!GREEDY_REALLOC(partition->copy_files, partition->n_copy_files + 1))
                 return log_oom();
+
+        partition->copy_files[partition->n_copy_files++] = (CopyFiles) {
+                .source = TAKE_PTR(resolved_source),
+                .target = TAKE_PTR(resolved_target),
+                .flags = flags,
+        };
 
         return 0;
 }
@@ -2344,11 +2413,29 @@ static bool partition_needs_populate(const Partition *p) {
         assert(p);
         assert(!p->supplement_for || !p->suppressing); /* Avoid infinite recursion */
 
-        return !strv_isempty(p->copy_files) ||
+        return p->n_copy_files > 0 ||
                 !strv_isempty(p->make_directories) ||
                 !strv_isempty(p->make_symlinks) ||
                 partition_add_validatefs(p) ||
                 (p->suppressing && partition_needs_populate(p->suppressing));
+}
+
+static MakeFileSystemFlags partition_mkfs_flags(const Partition *p) {
+        MakeFileSystemFlags flags = 0;
+
+        if (arg_discard)
+                flags |= MKFS_DISCARD;
+
+        if (streq(p->format, "erofs") && !DEBUG_LOGGING)
+                flags |= MKFS_QUIET;
+
+        FOREACH_ARRAY(cf, p->copy_files, p->n_copy_files)
+                if (cf->flags & COPY_PRESERVE_FS_VERITY) {
+                        flags |= MKFS_FS_VERITY;
+                        break;
+                }
+
+        return flags;
 }
 
 static int partition_read_definition(Partition *p, const char *path, const char *const *conf_file_dirs) {
@@ -2367,7 +2454,7 @@ static int partition_read_definition(Partition *p, const char *path, const char 
                 { "Partition", "FactoryReset",             config_parse_bool,              0,                                  &p->factory_reset           },
                 { "Partition", "CopyBlocks",               config_parse_copy_blocks,       0,                                  p                           },
                 { "Partition", "Format",                   config_parse_fstype,            0,                                  &p->format                  },
-                { "Partition", "CopyFiles",                config_parse_copy_files,        0,                                  &p->copy_files              },
+                { "Partition", "CopyFiles",                config_parse_copy_files,        0,                                  p                           },
                 { "Partition", "ExcludeFiles",             config_parse_exclude_files,     0,                                  &p->exclude_files_source    },
                 { "Partition", "ExcludeFilesTarget",       config_parse_exclude_files,     0,                                  &p->exclude_files_target    },
                 { "Partition", "MakeDirectories",          config_parse_make_dirs,         0,                                  &p->make_directories        },
@@ -4354,7 +4441,7 @@ static int prepare_temporary_file(Context *context, PartitionTarget *t, uint64_t
 
         if (FLAGS_SET(attrs, FS_NOCOW_FL)) {
                 r = chattr_fd(fd, FS_NOCOW_FL, FS_NOCOW_FL);
-                if (r < 0 && !ERRNO_IS_NOT_SUPPORTED(r))
+                if (r < 0 && !ERRNO_IS_IOCTL_NOT_SUPPORTED(r))
                         return log_error_errno(r, "Failed to disable copy-on-write on %s: %m", temp);
         }
 
@@ -5629,7 +5716,6 @@ static int file_is_denylisted(const char *source, Hashmap *denylist) {
 
 static int do_copy_files(Context *context, Partition *p, const char *root) {
         _cleanup_strv_free_ char **subvolumes = NULL;
-        _cleanup_free_ char **override_copy_files = NULL;
         int r;
 
         assert(p);
@@ -5639,31 +5725,36 @@ static int do_copy_files(Context *context, Partition *p, const char *root) {
         if (r < 0)
                 return r;
 
+        _cleanup_free_ CopyFiles *copy_files = newdup(CopyFiles, p->copy_files, p->n_copy_files);
+        if (!copy_files)
+                return log_oom();
+
+        size_t n_copy_files = p->n_copy_files;
         if (p->suppressing) {
-                r = shallow_join_strv(&override_copy_files, p->copy_files, p->suppressing->copy_files);
-                if (r < 0)
-                        return r;
+                if (!GREEDY_REALLOC_APPEND(copy_files, n_copy_files,
+                                           p->suppressing->copy_files, p->suppressing->n_copy_files))
+                        return log_oom();
         }
 
         /* copy_tree_at() automatically copies the permissions of source directories to target directories if
          * it created them. However, the root directory is created by us, so we have to manually take care
          * that it is initialized. We use the first source directory targeting "/" as the metadata source for
          * the root directory. */
-        STRV_FOREACH_PAIR(source, target, override_copy_files ?: p->copy_files) {
+        FOREACH_ARRAY(line, copy_files, n_copy_files) {
                 _cleanup_close_ int rfd = -EBADF, sfd = -EBADF;
 
-                if (!path_equal(*target, "/"))
+                if (!path_equal(line->target, "/"))
                         continue;
 
                 rfd = open(root, O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
                 if (rfd < 0)
                         return -errno;
 
-                sfd = chase_and_open(*source, arg_copy_source, CHASE_PREFIX_ROOT, O_PATH|O_DIRECTORY|O_CLOEXEC|O_NOCTTY, NULL);
+                sfd = chase_and_open(line->source, arg_copy_source, CHASE_PREFIX_ROOT, O_PATH|O_DIRECTORY|O_CLOEXEC|O_NOCTTY, NULL);
                 if (sfd == -ENOTDIR)
                         continue;
                 if (sfd < 0)
-                        return log_error_errno(sfd, "Failed to open source file '%s%s': %m", strempty(arg_copy_source), *source);
+                        return log_error_errno(sfd, "Failed to open source file '%s%s': %m", strempty(arg_copy_source), line->source);
 
                 (void) copy_xattr(sfd, NULL, rfd, NULL, COPY_ALL_XATTRS);
                 (void) copy_access(sfd, rfd);
@@ -5672,50 +5763,50 @@ static int do_copy_files(Context *context, Partition *p, const char *root) {
                 break;
         }
 
-        STRV_FOREACH_PAIR(source, target, override_copy_files ?: p->copy_files) {
+        FOREACH_ARRAY(line, copy_files, n_copy_files) {
                 _cleanup_hashmap_free_ Hashmap *denylist = NULL;
                 _cleanup_set_free_ Set *subvolumes_by_source_inode = NULL;
                 _cleanup_close_ int sfd = -EBADF, pfd = -EBADF, tfd = -EBADF;
                 usec_t ts = epoch_or_infinity();
 
-                r = make_copy_files_denylist(context, p, *source, *target, &denylist);
+                r = make_copy_files_denylist(context, p, line->source, line->target, &denylist);
                 if (r < 0)
                         return r;
                 if (r > 0)
                         continue;
 
-                r = make_subvolumes_set(p, *source, *target, &subvolumes_by_source_inode);
+                r = make_subvolumes_set(p, line->source, line->target, &subvolumes_by_source_inode);
                 if (r < 0)
                         return r;
 
-                sfd = chase_and_open(*source, arg_copy_source, CHASE_PREFIX_ROOT, O_CLOEXEC|O_NOCTTY, NULL);
+                sfd = chase_and_open(line->source, arg_copy_source, CHASE_PREFIX_ROOT, O_CLOEXEC|O_NOCTTY, NULL);
                 if (sfd == -ENOENT) {
-                        log_notice_errno(sfd, "Failed to open source file '%s%s', skipping: %m", strempty(arg_copy_source), *source);
+                        log_notice_errno(sfd, "Failed to open source file '%s%s', skipping: %m", strempty(arg_copy_source), line->source);
                         continue;
                 }
                 if (sfd < 0)
-                        return log_error_errno(sfd, "Failed to open source file '%s%s': %m", strempty(arg_copy_source), *source);
+                        return log_error_errno(sfd, "Failed to open source file '%s%s': %m", strempty(arg_copy_source), line->source);
 
                 r = fd_verify_regular(sfd);
                 if (r < 0) {
                         if (r != -EISDIR)
-                                return log_error_errno(r, "Failed to check type of source file '%s': %m", *source);
+                                return log_error_errno(r, "Failed to check type of source file '%s': %m", line->source);
 
                         /* We are looking at a directory */
-                        tfd = chase_and_open(*target, root, CHASE_PREFIX_ROOT, O_RDONLY|O_DIRECTORY|O_CLOEXEC, NULL);
+                        tfd = chase_and_open(line->target, root, CHASE_PREFIX_ROOT, O_RDONLY|O_DIRECTORY|O_CLOEXEC, NULL);
                         if (tfd < 0) {
                                 _cleanup_free_ char *dn = NULL, *fn = NULL;
 
                                 if (tfd != -ENOENT)
-                                        return log_error_errno(tfd, "Failed to open target directory '%s': %m", *target);
+                                        return log_error_errno(tfd, "Failed to open target directory '%s': %m", line->target);
 
-                                r = path_extract_filename(*target, &fn);
+                                r = path_extract_filename(line->target, &fn);
                                 if (r < 0)
-                                        return log_error_errno(r, "Failed to extract filename from '%s': %m", *target);
+                                        return log_error_errno(r, "Failed to extract filename from '%s': %m", line->target);
 
-                                r = path_extract_directory(*target, &dn);
+                                r = path_extract_directory(line->target, &dn);
                                 if (r < 0)
-                                        return log_error_errno(r, "Failed to extract directory from '%s': %m", *target);
+                                        return log_error_errno(r, "Failed to extract directory from '%s': %m", line->target);
 
                                 r = mkdir_p_root_full(root, dn, UID_INVALID, GID_INVALID, 0755, ts, subvolumes);
                                 if (r < 0)
@@ -5729,41 +5820,41 @@ static int do_copy_files(Context *context, Partition *p, const char *root) {
                                                 sfd, ".",
                                                 pfd, fn,
                                                 UID_INVALID, GID_INVALID,
-                                                COPY_REFLINK|COPY_HOLES|COPY_MERGE|COPY_REPLACE|COPY_SIGINT|COPY_HARDLINKS|COPY_ALL_XATTRS|COPY_GRACEFUL_WARN|COPY_TRUNCATE|COPY_RESTORE_DIRECTORY_TIMESTAMPS,
+                                                line->flags,
                                                 denylist, subvolumes_by_source_inode);
                         } else
                                 r = copy_tree_at(
                                                 sfd, ".",
                                                 tfd, ".",
                                                 UID_INVALID, GID_INVALID,
-                                                COPY_REFLINK|COPY_HOLES|COPY_MERGE|COPY_REPLACE|COPY_SIGINT|COPY_HARDLINKS|COPY_ALL_XATTRS|COPY_GRACEFUL_WARN|COPY_TRUNCATE|COPY_RESTORE_DIRECTORY_TIMESTAMPS,
+                                                line->flags,
                                                 denylist, subvolumes_by_source_inode);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to copy '%s%s' to '%s%s': %m",
-                                                       strempty(arg_copy_source), *source, strempty(root), *target);
+                                                       strempty(arg_copy_source), line->source, strempty(root), line->target);
                 } else {
                         _cleanup_free_ char *dn = NULL, *fn = NULL;
 
                         /* We are looking at a regular file */
 
-                        r = file_is_denylisted(*source, denylist);
+                        r = file_is_denylisted(line->source, denylist);
                         if (r < 0)
                                 return r;
                         if (r > 0) {
-                                log_debug("%s is in the denylist, ignoring", *source);
+                                log_debug("%s is in the denylist, ignoring", line->source);
                                 continue;
                         }
 
-                        r = path_extract_filename(*target, &fn);
+                        r = path_extract_filename(line->target, &fn);
                         if (r == -EADDRNOTAVAIL || r == O_DIRECTORY)
                                 return log_error_errno(SYNTHETIC_ERRNO(EISDIR),
-                                                       "Target path '%s' refers to a directory, but source path '%s' refers to regular file, can't copy.", *target, *source);
+                                                       "Target path '%s' refers to a directory, but source path '%s' refers to regular file, can't copy.", line->target, line->source);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to extract filename from '%s': %m", *target);
+                                return log_error_errno(r, "Failed to extract filename from '%s': %m", line->target);
 
-                        r = path_extract_directory(*target, &dn);
+                        r = path_extract_directory(line->target, &dn);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to extract directory from '%s': %m", *target);
+                                return log_error_errno(r, "Failed to extract directory from '%s': %m", line->target);
 
                         r = mkdir_p_root_full(root, dn, UID_INVALID, GID_INVALID, 0755, ts, subvolumes);
                         if (r < 0)
@@ -5775,11 +5866,11 @@ static int do_copy_files(Context *context, Partition *p, const char *root) {
 
                         tfd = openat(pfd, fn, O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC, 0700);
                         if (tfd < 0)
-                                return log_error_errno(errno, "Failed to create target file '%s': %m", *target);
+                                return log_error_errno(errno, "Failed to create target file '%s': %m", line->target);
 
                         r = copy_bytes(sfd, tfd, UINT64_MAX, COPY_REFLINK|COPY_HOLES|COPY_SIGINT|COPY_TRUNCATE);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to copy '%s' to '%s%s': %m", *source, strempty(arg_copy_source), *target);
+                                return log_error_errno(r, "Failed to copy '%s' to '%s%s': %m", line->source, strempty(arg_copy_source), line->target);
 
                         (void) copy_xattr(sfd, NULL, tfd, NULL, COPY_ALL_XATTRS);
                         (void) copy_access(sfd, tfd);
@@ -6240,8 +6331,7 @@ static int context_mkfs(Context *context) {
                         return r;
 
                 r = make_filesystem(partition_target_path(t), p->format, strempty(p->new_label), root,
-                                    p->fs_uuid, arg_discard,
-                                    /* quiet = */ streq(p->format, "erofs") && !DEBUG_LOGGING,
+                                    p->fs_uuid, partition_mkfs_flags(p),
                                     context->fs_sector_size, p->compression, p->compression_level,
                                     extra_mkfs_options);
                 if (r < 0)
@@ -7495,7 +7585,7 @@ static bool need_fstab(const Context *context) {
 static int context_fstab(Context *context) {
         _cleanup_(unlink_and_freep) char *t = NULL;
         _cleanup_fclose_ FILE *f = NULL;
-        _cleanup_free_ char *path = NULL;
+        _cleanup_free_ char *path = NULL, *c = NULL;
         int r;
 
         assert(context);
@@ -7517,7 +7607,7 @@ static int context_fstab(Context *context) {
         if (r < 0)
                 return log_error_errno(r, "Failed to open temporary file for %s: %m", path);
 
-        fprintf(f, "# Automatically generated by systemd-repart\n\n");
+        fputs(AUTOMATIC_FSTAB_HEADER_START "\n", f);
 
         LIST_FOREACH(partitions, p, context->partitions) {
                 _cleanup_free_ char *what = NULL, *options = NULL;
@@ -7552,7 +7642,38 @@ static int context_fstab(Context *context) {
                 }
         }
 
-        r = flink_tmpfile(f, t, path, 0);
+        fputs(AUTOMATIC_FSTAB_HEADER_END "\n", f);
+
+        switch (arg_append_fstab) {
+        case APPEND_AUTO: {
+                r = read_full_file(path, &c, NULL);
+                if (r < 0) {
+                        if (r == -ENOENT) {
+                                log_debug("File fstab not found in %s", path);
+                                break;
+                        }
+                        return log_error_errno(r, "Failed to open %s: %m", path);
+                }
+
+                const char *acs, *ace;
+                acs = find_line(c, AUTOMATIC_FSTAB_HEADER_START);
+                if (acs) {
+                        fwrite(c, 1, acs - c, f);
+                        ace = find_line_after(acs, AUTOMATIC_FSTAB_HEADER_END);
+                        if (ace)
+                                fputs(ace, f);
+                } else
+                        fputs(c, f);
+                break;
+        }
+        case APPEND_NO:
+        case APPEND_REPLACE:
+                break;
+        default:
+                assert_not_reached();
+        }
+
+        r = flink_tmpfile(f, t, path, IN_SET(arg_append_fstab, APPEND_AUTO, APPEND_REPLACE) ? LINK_TMPFILE_REPLACE : 0);
         if (r < 0)
                 return log_error_errno(r, "Failed to link temporary file to %s: %m", path);
 
@@ -7804,8 +7925,7 @@ static int context_minimize(Context *context) {
                                     strempty(p->new_label),
                                     root,
                                     fs_uuid,
-                                    arg_discard,
-                                    /* quiet = */ streq(p->format, "erofs") && !DEBUG_LOGGING,
+                                    partition_mkfs_flags(p),
                                     context->fs_sector_size,
                                     p->compression,
                                     p->compression_level,
@@ -7896,8 +8016,7 @@ static int context_minimize(Context *context) {
                                     strempty(p->new_label),
                                     root,
                                     p->fs_uuid,
-                                    arg_discard,
-                                    /* quiet = */ streq(p->format, "erofs") && !DEBUG_LOGGING,
+                                    partition_mkfs_flags(p),
                                     context->fs_sector_size,
                                     p->compression,
                                     p->compression_level,
@@ -8174,6 +8293,8 @@ static int help(void) {
                "  -C --make-ddi=confext   Make a configuration extension DDI\n"
                "  -P --make-ddi=portable  Make a portable service DDI\n"
                "\n%3$sAuxiliary Resource Generation:%4$s\n"
+               "     --append-fstab=MODE  One of no, auto, replace; controls how to join the\n"
+               "                          content of a pre-existing fstab with the generated one\n"
                "     --generate-fstab=PATH\n"
                "                          Write fstab configuration to the given path\n"
                "     --generate-crypttab=PATH\n"
@@ -8229,6 +8350,7 @@ static int parse_argv(int argc, char *argv[], X509 **ret_certificate, EVP_PKEY *
                 ARG_OFFLINE,
                 ARG_COPY_FROM,
                 ARG_MAKE_DDI,
+                ARG_APPEND_FSTAB,
                 ARG_GENERATE_FSTAB,
                 ARG_GENERATE_CRYPTTAB,
                 ARG_LIST_DEVICES,
@@ -8275,6 +8397,7 @@ static int parse_argv(int argc, char *argv[], X509 **ret_certificate, EVP_PKEY *
                 { "copy-from",            required_argument, NULL, ARG_COPY_FROM            },
                 { "copy-source",          required_argument, NULL, 's'                      },
                 { "make-ddi",             required_argument, NULL, ARG_MAKE_DDI             },
+                { "append-fstab",         required_argument, NULL, ARG_APPEND_FSTAB         },
                 { "generate-fstab",       required_argument, NULL, ARG_GENERATE_FSTAB       },
                 { "generate-crypttab",    required_argument, NULL, ARG_GENERATE_CRYPTTAB    },
                 { "list-devices",         no_argument,       NULL, ARG_LIST_DEVICES         },
@@ -8658,6 +8781,17 @@ static int parse_argv(int argc, char *argv[], X509 **ret_certificate, EVP_PKEY *
                                 return r;
                         break;
 
+                case ARG_APPEND_FSTAB:
+                        if (isempty(optarg)) {
+                                arg_append_fstab = APPEND_AUTO;
+                                break;
+                        }
+
+                        arg_append_fstab = append_mode_from_string(optarg);
+                        if (arg_append_fstab < 0)
+                                return log_error_errno(arg_append_fstab, "Failed to parse --append-fstab= parameter: %s", optarg);
+                        break;
+
                 case ARG_GENERATE_FSTAB:
                         r = parse_path_argument(optarg, /* suppress_root= */ false, &arg_generate_fstab);
                         if (r < 0)
@@ -8849,6 +8983,9 @@ static int parse_argv(int argc, char *argv[], X509 **ret_certificate, EVP_PKEY *
                 if (r < 0)
                         return log_error_errno(r, "Failed to load private key from %s: %m", arg_private_key);
         }
+
+        if (arg_append_fstab && !arg_generate_fstab)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "No --generate-fstab= specified for --append-fstab=%s.", append_mode_to_string(arg_append_fstab));
 
         *ret_certificate = TAKE_PTR(certificate);
         *ret_private_key = TAKE_PTR(private_key);

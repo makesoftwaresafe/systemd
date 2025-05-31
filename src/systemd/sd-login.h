@@ -17,9 +17,6 @@
   along with systemd; If not, see <https://www.gnu.org/licenses/>.
 ***/
 
-#include <inttypes.h>
-#include <sys/types.h>
-
 #include "_sd-common.h"
 
 /*
@@ -200,7 +197,7 @@ int sd_session_get_tty(const char *session, char **display);
 int sd_session_get_vt(const char *session, unsigned *vtnr);
 
 /* Return active session and user of seat */
-int sd_seat_get_active(const char *seat, char **session, uid_t *uid);
+int sd_seat_get_active(const char *seat, char **ret_session, uid_t *ret_uid);
 
 /* Return sessions and users on seat. Returns number of sessions.
  * If sessions is NULL, this returns only the number of sessions. */

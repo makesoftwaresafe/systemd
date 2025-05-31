@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <fcntl.h>
+#include <sys/stat.h>
 
+#include "sd-bus.h"
 #include "sd-messages.h"
 
 #include "af-list.h"
@@ -10,6 +12,7 @@
 #include "bpf-devices.h"
 #include "bpf-firewall.h"
 #include "bpf-foreign.h"
+#include "bpf-program.h"
 #include "bpf-restrict-ifaces.h"
 #include "bpf-socket-bind.h"
 #include "btrfs-util.h"
@@ -19,12 +22,14 @@
 #include "cgroup-setup.h"
 #include "cgroup-util.h"
 #include "devnum-util.h"
+#include "errno-util.h"
+#include "extract-word.h"
 #include "fd-util.h"
+#include "fdset.h"
 #include "fileio.h"
 #include "firewall-util.h"
 #include "in-addr-prefix-util.h"
 #include "inotify-util.h"
-#include "io-util.h"
 #include "ip-protocol-list.h"
 #include "limits-util.h"
 #include "manager.h"
@@ -32,18 +37,22 @@
 #include "parse-util.h"
 #include "path-util.h"
 #include "percent-util.h"
+#include "pidref.h"
 #include "process-util.h"
 #include "procfs-util.h"
 #include "serialize.h"
+#include "set.h"
 #include "special.h"
 #include "stdio-util.h"
 #include "string-table.h"
 #include "string-util.h"
+#include "strv.h"
 #include "virt.h"
 
 #if BPF_FRAMEWORK
 #include "bpf-dlopen.h"
 #include "bpf-link.h"
+#include "bpf-restrict-fs.h"
 #include "bpf/restrict_fs/restrict-fs-skel.h"
 #endif
 
@@ -52,7 +61,7 @@
 /* Returns the log level to use when cgroup attribute writes fail. When an attribute is missing or we have access
  * problems we downgrade to LOG_DEBUG. This is supposed to be nice to container managers and kernels which want to mask
  * out specific attributes from us. */
-#define LOG_LEVEL_CGROUP_WRITE(r) (IN_SET(abs(r), ENOENT, EROFS, EACCES, EPERM) ? LOG_DEBUG : LOG_WARNING)
+#define LOG_LEVEL_CGROUP_WRITE(r) (IN_SET(ABS(r), ENOENT, EROFS, EACCES, EPERM) ? LOG_DEBUG : LOG_WARNING)
 
 static void unit_remove_from_cgroup_empty_queue(Unit *u);
 
@@ -1718,7 +1727,7 @@ static CGroupMask unit_get_cgroup_mask(Unit *u) {
             cgroup_tasks_max_isset(&c->tasks_max))
                 mask |= CGROUP_MASK_PIDS;
 
-        return CGROUP_MASK_EXTEND_JOINED(mask);
+        return mask;
 }
 
 static CGroupMask unit_get_bpf_mask(Unit *u) {
@@ -1769,7 +1778,7 @@ CGroupMask unit_get_delegate_mask(Unit *u) {
                 return 0;
 
         assert_se(c = unit_get_cgroup_context(u));
-        return CGROUP_MASK_EXTEND_JOINED(c->delegate_controllers);
+        return c->delegate_controllers;
 }
 
 static CGroupMask unit_get_subtree_mask(Unit *u) {
@@ -2751,7 +2760,7 @@ int unit_cgroup_is_empty(Unit *u) {
         if (!crt->cgroup_path)
                 return -EOWNERDEAD;
 
-        r = cg_is_empty_recursive(SYSTEMD_CGROUP_CONTROLLER, crt->cgroup_path);
+        r = cg_is_empty(SYSTEMD_CGROUP_CONTROLLER, crt->cgroup_path);
         if (r < 0)
                 log_unit_debug_errno(u, r, "Failed to determine whether cgroup %s is empty: %m", empty_to_root(crt->cgroup_path));
         return r;
@@ -2799,18 +2808,12 @@ static int unit_prune_cgroup_via_bus(Unit *u) {
                 return -EOWNERDEAD;
 
         /* Determine this unit's cgroup path relative to our cgroup root */
-        const char *pp = path_startswith(crt->cgroup_path, u->manager->cgroup_root);
+        const char *pp = path_startswith_full(
+                        crt->cgroup_path,
+                        u->manager->cgroup_root,
+                        PATH_STARTSWITH_RETURN_LEADING_SLASH|PATH_STARTSWITH_REFUSE_DOT_DOT);
         if (!pp)
                 return -EINVAL;
-
-        _cleanup_free_ char *absolute = NULL;
-        if (!path_is_absolute(pp)) { /* RemoveSubgroupFromUnit() wants an absolute path */
-                absolute = strjoin("/", pp);
-                if (!absolute)
-                        return -ENOMEM;
-
-                pp = absolute;
-        }
 
         r = bus_call_method(u->manager->system_bus,
                             bus_systemd_mgr,
@@ -3017,7 +3020,7 @@ int unit_check_oomd_kill(Unit *u) {
         if (!crt || !crt->cgroup_path)
                 return 0;
 
-        r = cg_get_xattr_malloc(crt->cgroup_path, "user.oomd_ooms", &value, /* ret_size= */ NULL);
+        r = cg_get_xattr(crt->cgroup_path, "user.oomd_ooms", &value, /* ret_size= */ NULL);
         if (r < 0 && !ERRNO_IS_XATTR_ABSENT(r))
                 return r;
 
@@ -3035,7 +3038,7 @@ int unit_check_oomd_kill(Unit *u) {
 
         n = 0;
         value = mfree(value);
-        r = cg_get_xattr_malloc(crt->cgroup_path, "user.oomd_kill", &value, /* ret_size= */ NULL);
+        r = cg_get_xattr(crt->cgroup_path, "user.oomd_kill", &value, /* ret_size= */ NULL);
         if (r >= 0 && !isempty(value))
                 (void) safe_atou64(value, &n);
 
@@ -3176,7 +3179,7 @@ static int unit_check_cgroup_events(Unit *u) {
         if (!crt || !crt->cgroup_path)
                 return 0;
 
-        r = cg_get_keyed_attribute_graceful(
+        r = cg_get_keyed_attribute(
                         SYSTEMD_CGROUP_CONTROLLER,
                         crt->cgroup_path,
                         "cgroup.events",
@@ -3188,22 +3191,18 @@ static int unit_check_cgroup_events(Unit *u) {
         /* The cgroup.events notifications can be merged together so act as we saw the given state for the
          * first time. The functions we call to handle given state are idempotent, which makes them
          * effectively remember the previous state. */
-        if (values[0]) {
-                if (streq(values[0], "1"))
-                        unit_remove_from_cgroup_empty_queue(u);
-                else
-                        unit_add_to_cgroup_empty_queue(u);
-        }
+        if (streq(values[0], "1"))
+                unit_remove_from_cgroup_empty_queue(u);
+        else
+                unit_add_to_cgroup_empty_queue(u);
 
         /* Disregard freezer state changes due to operations not initiated by us.
          * See: https://github.com/systemd/systemd/pull/13512/files#r416469963 and
          *      https://github.com/systemd/systemd/pull/13512#issuecomment-573007207 */
-        if (values[1] && IN_SET(u->freezer_state, FREEZER_FREEZING, FREEZER_FREEZING_BY_PARENT, FREEZER_THAWING))
+        if (IN_SET(u->freezer_state, FREEZER_FREEZING, FREEZER_FREEZING_BY_PARENT, FREEZER_THAWING))
                 unit_freezer_complete(u, streq(values[1], "0") ? FREEZER_RUNNING : FREEZER_FROZEN);
 
-        free(values[0]);
-        free(values[1]);
-
+        free_many_charp(values, ELEMENTSOF(values));
         return 0;
 }
 
@@ -3627,8 +3626,6 @@ static int unit_get_cpu_usage_raw(const Unit *u, const CGroupRuntime *crt, nsec_
         uint64_t us;
 
         r = cg_get_keyed_attribute("cpu", crt->cgroup_path, "cpu.stat", STRV_MAKE("usage_usec"), &val);
-        if (IN_SET(r, -ENOENT, -ENXIO))
-                return -ENODATA;
         if (r < 0)
                 return r;
 
@@ -3983,16 +3980,6 @@ void unit_invalidate_cgroup(Unit *u, CGroupMask m) {
         if (!crt)
                 return;
 
-        if (m == 0)
-                return;
-
-        /* always invalidate compat pairs together */
-        if (m & (CGROUP_MASK_IO | CGROUP_MASK_BLKIO))
-                m |= CGROUP_MASK_IO | CGROUP_MASK_BLKIO;
-
-        if (m & (CGROUP_MASK_CPU | CGROUP_MASK_CPUACCT))
-                m |= CGROUP_MASK_CPU | CGROUP_MASK_CPUACCT;
-
         if (FLAGS_SET(crt->cgroup_invalidated_mask, m)) /* NOP? */
                 return;
 
@@ -4083,8 +4070,6 @@ static int unit_cgroup_freezer_kernel_state(Unit *u, FreezerState *ret) {
                         "cgroup.events",
                         STRV_MAKE("frozen"),
                         &val);
-        if (IN_SET(r, -ENOENT, -ENXIO))
-                return -ENODATA;
         if (r < 0)
                 return r;
 

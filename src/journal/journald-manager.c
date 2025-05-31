@@ -1,9 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <linux/sockios.h>
-#if HAVE_SELINUX
-#include <selinux/selinux.h>
-#endif
+#include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/signalfd.h>
@@ -12,6 +10,7 @@
 #include "sd-daemon.h"
 #include "sd-journal.h"
 #include "sd-messages.h"
+#include "sd-varlink.h"
 
 #include "acl-util.h"
 #include "alloc-util.h"
@@ -21,8 +20,8 @@
 #include "creds-util.h"
 #include "daemon-util.h"
 #include "dirent-util.h"
+#include "errno-util.h"
 #include "event-util.h"
-#include "extract-word.h"
 #include "fd-util.h"
 #include "fdset.h"
 #include "fileio.h"
@@ -30,8 +29,6 @@
 #include "fs-util.h"
 #include "hashmap.h"
 #include "hostname-setup.h"
-#include "hostname-util.h"
-#include "id128-util.h"
 #include "initrd-util.h"
 #include "iovec-util.h"
 #include "journal-authenticate.h"
@@ -46,25 +43,30 @@
 #include "journald-rate-limit.h"
 #include "journald-socket.h"
 #include "journald-stream.h"
+#include "journald-sync.h"
 #include "journald-syslog.h"
 #include "journald-varlink.h"
 #include "log.h"
+#include "log-ratelimit.h"
 #include "memory-util.h"
 #include "missing_audit.h"
 #include "mkdir.h"
 #include "parse-util.h"
 #include "path-util.h"
+#include "prioq.h"
 #include "proc-cmdline.h"
 #include "process-util.h"
 #include "rm-rf.h"
-#include "selinux-util.h"
+#include "set.h"
 #include "signal-util.h"
 #include "socket-netlink.h"
 #include "socket-util.h"
 #include "stdio-util.h"
 #include "string-table.h"
 #include "string-util.h"
+#include "strv.h"
 #include "syslog-util.h"
+#include "time-util.h"
 #include "uid-classification.h"
 #include "user-util.h"
 
@@ -1644,9 +1646,15 @@ void manager_full_flush(Manager *m) {
 
 static int dispatch_sigusr1(sd_event_source *es, const struct signalfd_siginfo *si, void *userdata) {
         Manager *m = ASSERT_PTR(userdata);
+        assert(si);
+
+        if (!si_code_from_process(si->ssi_code)) {
+                log_warning("Received SIGUSR1 with unexpected .si_code %i, ignoring.", si->ssi_code);
+                return 0;
+        }
 
         if (m->namespace) {
-                log_error("Received SIGUSR1 signal from PID %u, but flushing runtime journals not supported for namespaced instances.", si->ssi_pid);
+                log_warning("Received SIGUSR1 signal from PID %u, but flushing runtime journals not supported for namespaced instances, ignoring.", si->ssi_pid);
                 return 0;
         }
 
@@ -1680,6 +1688,12 @@ void manager_full_rotate(Manager *m) {
 
 static int dispatch_sigusr2(sd_event_source *es, const struct signalfd_siginfo *si, void *userdata) {
         Manager *m = ASSERT_PTR(userdata);
+        assert(si);
+
+        if (!si_code_from_process(si->ssi_code)) {
+                log_warning("Received SIGUSR2 with unexpected .si_code %i, ignoring.", si->ssi_code);
+                return 0;
+        }
 
         log_info("Received SIGUSR2 signal from PID %u, as request to rotate journal, rotating.", si->ssi_pid);
         manager_full_rotate(m);
@@ -1784,6 +1798,12 @@ void manager_full_sync(Manager *m, bool wait) {
 
 static int dispatch_sigrtmin1(sd_event_source *es, const struct signalfd_siginfo *si, void *userdata) {
         Manager *m = ASSERT_PTR(userdata);
+        assert(si);
+
+        if (!si_code_from_process(si->ssi_code)) {
+                log_warning("Received SIGRTMIN1 with unexpected .si_code %i, ignoring.", si->ssi_code);
+                return 0;
+        }
 
         log_debug("Received SIGRTMIN1 signal from PID %u, as request to sync.", si->ssi_pid);
         manager_full_sync(m, /* wait = */ false);
@@ -1834,7 +1854,7 @@ static int manager_setup_signals(Manager *m) {
         if (r < 0)
                 return r;
 
-        r = sd_event_add_signal(m->event, /* ret_event_source= */ NULL, (SIGRTMIN+18)|SD_EVENT_SIGNAL_PROCMASK, sigrtmin18_handler, &m->sigrtmin18_info);
+        r = sd_event_add_signal(m->event, /* ret= */ NULL, (SIGRTMIN+18)|SD_EVENT_SIGNAL_PROCMASK, sigrtmin18_handler, &m->sigrtmin18_info);
         if (r < 0)
                 return r;
 

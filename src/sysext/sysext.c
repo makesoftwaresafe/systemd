@@ -8,7 +8,6 @@
 #include <sys/mount.h>
 #include <unistd.h>
 
-#include "sd-bus.h"
 #include "sd-varlink.h"
 
 #include "argv-util.h"
@@ -32,10 +31,10 @@
 #include "hashmap.h"
 #include "image-policy.h"
 #include "initrd-util.h"
+#include "label-util.h"
 #include "log.h"
 #include "loop-util.h"
 #include "main-func.h"
-#include "missing_magic.h"
 #include "mkdir.h"
 #include "mount-util.h"
 #include "mountpoint-util.h"
@@ -55,7 +54,6 @@
 #include "string-util.h"
 #include "strv.h"
 #include "time-util.h"
-#include "user-util.h"
 #include "varlink-io.systemd.sysext.h"
 #include "varlink-util.h"
 #include "verbs.h"
@@ -1688,7 +1686,9 @@ static int merge_subprocess(
                 Hashmap *images,
                 const char *workspace) {
 
-        _cleanup_free_ char *host_os_release_id = NULL, *host_os_release_version_id = NULL, *host_os_release_api_level = NULL, *filename = NULL;
+        _cleanup_free_ char *host_os_release_id = NULL, *host_os_release_id_like = NULL,
+                        *host_os_release_version_id = NULL, *host_os_release_api_level = NULL,
+                        *filename = NULL;
         _cleanup_strv_free_ char **extensions = NULL, **extensions_v = NULL, **paths = NULL;
         size_t n_extensions = 0;
         unsigned n_ignored = 0;
@@ -1720,6 +1720,7 @@ static int merge_subprocess(
         r = parse_os_release(
                         arg_root,
                         "ID", &host_os_release_id,
+                        "ID_LIKE", &host_os_release_id_like,
                         "VERSION_ID", &host_os_release_version_id,
                         image_class_info[image_class].level_env, &host_os_release_api_level);
         if (r < 0)
@@ -1861,6 +1862,7 @@ static int merge_subprocess(
                         r = extension_release_validate(
                                         img->name,
                                         host_os_release_id,
+                                        host_os_release_id_like,
                                         host_os_release_version_id,
                                         host_os_release_api_level,
                                         in_initrd() ? "initrd" : "system",
