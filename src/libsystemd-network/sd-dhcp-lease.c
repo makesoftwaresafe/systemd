@@ -4,17 +4,14 @@
 ***/
 
 #include <arpa/inet.h>
-#include <errno.h>
-#include <stdlib.h>
 #include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
 
 #include "sd-dhcp-lease.h"
 
 #include "alloc-util.h"
 #include "dhcp-lease-internal.h"
 #include "dhcp-option.h"
+#include "dns-def.h"
 #include "dns-domain.h"
 #include "dns-resolver-internal.h"
 #include "env-file.h"

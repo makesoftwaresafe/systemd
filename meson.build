@@ -15,7 +15,7 @@ project('systemd', 'c',
 
 add_test_setup(
         'default',
-        exclude_suites : ['integration-tests'],
+        exclude_suites : ['clang-tidy', 'integration-tests'],
         is_default : true,
 )
 
@@ -442,8 +442,16 @@ possible_common_link_flags = [
 c_args = get_option('c_args')
 
 # Our json library does not support -ffinite-math-only, which is enabled by -Ofast or -ffast-math.
-if (('-Ofast' in c_args or '-ffast-math' in c_args or '-ffinite-math-only' in c_args) and '-fno-finite-math-only' not in c_args)
-        error('-Ofast, -ffast-math, or -ffinite-math-only is specified in c_args.')
+have = false
+foreach arg : c_args
+        if arg in ['-ffinite-math-only', '-ffast-math', '-Ofast']
+                have = true
+        elif arg in ['-fno-finite-math-only', '-fno-fast-math']
+                have = false
+        endif
+endforeach
+if have
+        error('-ffinite-math-only is enabled (may be implied by -ffast-math or -Ofast) in c_args.')
 endif
 
 # Disable -Wmaybe-uninitialized when compiling with -Os/-O1/-O3/etc. There are
@@ -455,7 +463,8 @@ if cc.get_id() == 'gcc' and (not '02'.contains(get_option('optimization')) or
                              '-Os' in c_args or
                              '-O1' in c_args or
                              '-O3' in c_args or
-                             '-Og' in c_args)
+                             '-Og' in c_args or
+                             '-Ofast' in c_args)
         possible_common_cc_flags += '-Wno-maybe-uninitialized'
 endif
 
@@ -480,7 +489,6 @@ endif
 if cc.get_id() == 'clang'
         possible_common_cc_flags += [
                 '-Wno-typedef-redefinition',
-                '-Wno-gnu-variable-sized-type-not-at-end',
         ]
 endif
 
@@ -801,6 +809,11 @@ if conf.get('SYSTEM_ALLOC_GID_MIN') >= conf.get('SYSTEM_GID_MAX')
         error('Invalid gid allocation range')
 endif
 
+greeter_uid_min = get_option('greeter-uid-min')
+greeter_uid_max = get_option('greeter-uid-max')
+conf.set('GREETER_UID_MIN', greeter_uid_min)
+conf.set('GREETER_UID_MAX', greeter_uid_max)
+
 dynamic_uid_min = get_option('dynamic-uid-min')
 dynamic_uid_max = get_option('dynamic-uid-max')
 conf.set('DYNAMIC_UID_MIN', dynamic_uid_min)
@@ -1111,7 +1124,9 @@ else
 endif
 
 libmount = dependency('mount',
-                      version : fuzzer_build ? '>= 0' : '>= 2.30')
+                      version : fuzzer_build ? '>= 0' : '>= 2.30',
+                      disabler : true,
+                      required : get_option('libmount'))
 
 libfdisk = dependency('fdisk',
                       version : '>= 2.32',
@@ -1569,17 +1584,17 @@ have = have and conf.get('HAVE_PAM') == 1
 conf.set10('ENABLE_PAM_HOME', have)
 
 feature = get_option('remote')
-have_deps = [conf.get('HAVE_MICROHTTPD') == 1,
-             conf.get('HAVE_LIBCURL') == 1]
-# sd-j-remote requires µhttpd, and sd-j-upload requires libcurl, so
-# it's possible to build one without the other. Complain only if
-# support was explicitly requested. The auxiliary files like sysusers
-# config should be installed when any of the programs are built.
-if feature.enabled() and not (have_deps[0] and have_deps[1])
-        error('remote support was requested, but dependencies are not available')
+if feature.enabled()
+        if conf.get('HAVE_MICROHTTPD') != 1
+                error('remote support was requested, but microhttpd is not available')
+        endif
+        if conf.get('HAVE_LIBCURL') != 1
+                error('remote support was requested, but libcurl is not available')
+        endif
 endif
-have = feature.allowed() and (have_deps[0] or have_deps[1])
-conf.set10('ENABLE_REMOTE', have)
+# A more minimal version of systemd-journal-remote can always be built, even if neither
+# libcurl nor microhttpd are available.
+conf.set10('ENABLE_REMOTE', feature.allowed())
 
 feature = get_option('vmspawn').disable_auto_if(conf.get('BUILD_MODE_DEVELOPER') == 0)
 conf.set10('ENABLE_VMSPAWN', feature.allowed())
@@ -2002,6 +2017,7 @@ executables_by_name = {}
 objects_by_name = {}
 fuzzer_exes = []
 generated_sources = [version_h, vmlinux_h_dependency]
+sources = []
 
 # binaries that have --help and are intended for use by humans,
 # usually, but not always, installed in /bin.
@@ -2081,14 +2097,11 @@ if static_libsystemd != 'false'
                 install_tag: 'libsystemd',
                 install_dir : libdir,
                 pic : static_libsystemd_pic,
-                dependencies : [libblkid,
-                                libcap,
+                dependencies : [libcap,
                                 libdl,
                                 libgcrypt_cflags,
                                 liblz4_cflags,
                                 libm,
-                                libmount,
-                                libopenssl,
                                 librt,
                                 libxz_cflags,
                                 libzstd_cflags,
@@ -2196,7 +2209,7 @@ test_additional_kwargs = {
 }
 
 fuzz_template = executable_template + {
-        'build_by_default' : fuzzer_build,
+        'build_by_default' : want_fuzz_tests,
         'install' : false,
 }
 
@@ -2423,6 +2436,10 @@ foreach dict : executables
                 continue
         endif
 
+        if name.endswith('.standalone') and not have_standalone_binaries
+                continue
+        endif
+
         kwargs = {}
         foreach key, val : dict
                 if key in ['name', 'dbus', 'public', 'conditions',
@@ -2469,6 +2486,10 @@ foreach dict : executables
         )
 
         executables_by_name += { name : exe }
+
+        if not name.endswith('.standalone')
+                sources += dict.get('sources', [])
+        endif
 
         if dict.has_key('extract')
                 objects_by_name += {
@@ -2602,7 +2623,7 @@ foreach dict : modules
         if is_nss
                 # We cannot use shared_module because it does not support version suffix.
                 # Unfortunately shared_library insists on creating the symlink…
-                meson.add_install_script(sh, '-c', 'rm $DESTDIR@0@/lib@1@.so'.format(libdir, name),
+                meson.add_install_script(sh, '-c', 'rm -f $DESTDIR@0@/lib@1@.so'.format(libdir, name),
                                          install_tag : 'nss')
                 nss_targets += lib
         endif
@@ -2829,23 +2850,36 @@ endif
 
 alias_target('gensources', generated_sources)
 
-run_clang_tidy = find_program('run-clang-tidy', required : false)
-if run_clang_tidy.found()
-        run_target(
-                'clang-tidy',
-                command : [
-                        run_clang_tidy,
-                        '-use-color',
-                        '-quiet',
-                        '-p', meson.project_build_root(),
-                        # There seems to be a bug in clang-tidy where by even with --quiet some
-                        # messages from clang's own diagnostics engine leak through:
-                        #     X warnings generated.
-                        # Until this is fixed upstream, we use -fno-caret-diagnostics to suppress these.
-                        '-extra-arg=-fno-caret-diagnostics',
-                ],
-                depends : generated_sources
-        )
+clang_tidy = find_program('clang-tidy', required : false)
+if meson.version().version_compare('>=1.4.0')
+        foreach source : sources
+                if systemd_headers.contains(source)
+                        continue
+                endif
+
+                if not source.full_path().endswith('.c') and not source.full_path().endswith('.h')
+                        continue
+                endif
+
+                inputs = [source]
+
+                header = source.full_path().replace('.c', '.h')
+                if fs.exists(header) and header != source.full_path() and header != libudev_h_path
+                        inputs += header
+                endif
+
+                foreach input : inputs
+                        if clang_tidy.found()
+                                test(
+                                        'clang-tidy-@0@'.format(fs.name(input)),
+                                        clang_tidy,
+                                        args : ['-p', meson.project_build_root(), input],
+                                        suite : 'clang-tidy',
+                                        depends : generated_sources,
+                                )
+                        endif
+                endforeach
+        endforeach
 endif
 
 check_api_docs_sh = find_program('tools/check-api-docs.sh')
@@ -2920,6 +2954,7 @@ summary({
                                                                          conf.get('SYSTEM_ALLOC_UID_MIN')),
         'system GIDs' :                     '<=@0@ (alloc >=@1@)'.format(conf.get('SYSTEM_GID_MAX'),
                                                                          conf.get('SYSTEM_ALLOC_GID_MIN')),
+        'greeter UIDs' :                    '@0@…@1@'.format(greeter_uid_min, greeter_uid_max),
         'dynamic UIDs' :                    '@0@…@1@'.format(dynamic_uid_min, dynamic_uid_max),
         'container UID bases' :             '@0@…@1@'.format(container_uid_base_min, container_uid_base_max),
         'foreign UID base' :                '@0@'.format(foreign_uid_base),

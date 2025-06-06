@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -11,10 +10,11 @@
 #include "device-util.h"
 #include "errno-util.h"
 #include "fd-util.h"
-#include "fileio.h"
 #include "format-util.h"
 #include "fs-util.h"
+#include "hashmap.h"
 #include "id128-util.h"
+#include "log.h"
 #include "logind.h"
 #include "logind-device.h"
 #include "logind-seat.h"
@@ -24,12 +24,14 @@
 #include "logind-session-device.h"
 #include "logind-user.h"
 #include "mkdir-label.h"
-#include "parse-util.h"
 #include "path-util.h"
+#include "set.h"
 #include "stdio-util.h"
 #include "string-util.h"
 #include "terminal-util.h"
 #include "tmpfile-util.h"
+#include "udev-util.h"
+#include "user-record.h"
 
 int seat_new(Manager *m, const char *id, Seat **ret) {
         _cleanup_(seat_freep) Seat *s = NULL;
@@ -88,8 +90,6 @@ Seat* seat_free(Seat *s) {
 }
 
 int seat_save(Seat *s) {
-        _cleanup_(unlink_and_freep) char *temp_path = NULL;
-        _cleanup_fclose_ FILE *f = NULL;
         int r;
 
         assert(s);
@@ -99,13 +99,16 @@ int seat_save(Seat *s) {
 
         r = mkdir_safe_label("/run/systemd/seats", 0755, 0, 0, MKDIR_WARN_MODE);
         if (r < 0)
-                goto fail;
+                return log_error_errno(r, "Failed to create /run/systemd/seats/: %m");
 
-        r = fopen_temporary(s->state_file, &f, &temp_path);
+        _cleanup_(unlink_and_freep) char *temp_path = NULL;
+        _cleanup_fclose_ FILE *f = NULL;
+        r = fopen_tmpfile_linkable(s->state_file, O_WRONLY|O_CLOEXEC, &temp_path, &f);
         if (r < 0)
-                goto fail;
+                return log_error_errno(r, "Failed to create state file '%s': %m", s->state_file);
 
-        (void) fchmod(fileno(f), 0644);
+        if (fchmod(fileno(f), 0644) < 0)
+                return log_error_errno(errno, "Failed to set access mode for state file '%s' to 0644: %m", s->state_file);
 
         fprintf(f,
                 "# This is private data. Do not parse.\n"
@@ -144,21 +147,12 @@ int seat_save(Seat *s) {
                                 i->sessions_by_seat_next ? ' ' : '\n');
         }
 
-        r = fflush_and_check(f);
+        r = flink_tmpfile(f, temp_path, s->state_file, LINK_TMPFILE_REPLACE);
         if (r < 0)
-                goto fail;
+                return log_error_errno(r, "Failed to move '%s' into place: %m", s->state_file);
 
-        if (rename(temp_path, s->state_file) < 0) {
-                r = -errno;
-                goto fail;
-        }
-
-        temp_path = mfree(temp_path);
+        temp_path = mfree(temp_path); /* disarm auto-destroy: temporary file does not exist anymore */
         return 0;
-
-fail:
-        (void) unlink(s->state_file);
-        return log_error_errno(r, "Failed to save seat data %s: %m", s->state_file);
 }
 
 int seat_load(Seat *s) {
@@ -212,8 +206,10 @@ int seat_preallocate_vts(Seat *s) {
 static void seat_triggered_uevents_done(Seat *s) {
         assert(s);
 
-        if (!set_isempty(s->uevents))
+        if (!set_isempty(s->uevents)) {
+                log_debug("%s: waiting for %u events being processed by udevd.", s->id, set_size(s->uevents));
                 return;
+        }
 
         Session *session = s->active;
 
@@ -251,6 +247,7 @@ int manager_process_device_triggered_by_seat(Manager *m, sd_device *dev) {
         if (!s)
                 return 0;
 
+        log_device_uevent(dev, "Received event processed by udevd");
         free(ASSERT_PTR(set_remove(s->uevents, &uuid)));
         seat_triggered_uevents_done(s);
 
@@ -312,6 +309,8 @@ static int seat_trigger_devices(Seat *s) {
                         log_device_debug_errno(d, r, "Failed to trigger 'change' event, ignoring: %m");
                         continue;
                 }
+
+                log_device_debug(d, "Triggered synthetic event (ACTION=change, UUID=%s).", SD_ID128_TO_UUID_STRING(uuid));
 
                 _cleanup_free_ sd_id128_t *copy = newdup(sd_id128_t, &uuid, 1);
                 if (!copy)
@@ -767,4 +766,12 @@ bool seat_name_is_valid(const char *name) {
                 return false;
 
         return true;
+}
+
+bool seat_is_self(const char *name) {
+        return isempty(name) || streq(name, "self");
+}
+
+bool seat_is_auto(const char *name) {
+        return streq_ptr(name, "auto");
 }

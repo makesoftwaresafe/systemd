@@ -1,21 +1,21 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <errno.h>
 #include <fcntl.h>
 #include <linux/if_tun.h>
 #include <net/if.h>
-#include <netinet/if_ether.h>
+#include <net/if_arp.h>
 #include <sys/ioctl.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 
 #include "alloc-util.h"
 #include "daemon-util.h"
 #include "fd-util.h"
-#include "networkd-link.h"
+#include "hashmap.h"
 #include "networkd-manager.h"
 #include "socket-util.h"
+#include "string-util.h"
 #include "tuntap.h"
+#include "user-record.h"
+#include "user-util.h"
 #include "userdb.h"
 
 #define TUN_DEV "/dev/net/tun"
@@ -236,7 +236,9 @@ static int tuntap_verify(NetDev *netdev, const char *filename) {
         if (t->user_name) {
                 _cleanup_(user_record_unrefp) UserRecord *ur = NULL;
 
-                r = userdb_by_name(t->user_name, &USERDB_MATCH_ROOT_AND_SYSTEM, USERDB_PARSE_NUMERIC, &ur);
+                r = userdb_by_name(t->user_name, &USERDB_MATCH_ROOT_AND_SYSTEM,
+                                   USERDB_SUPPRESS_SHADOW | USERDB_PARSE_NUMERIC,
+                                   &ur);
                 if (r == -ENOEXEC)
                         log_netdev_warning_errno(netdev, r, "User %s is not a system user, ignoring.", t->user_name);
                 else if (r < 0)
@@ -248,7 +250,9 @@ static int tuntap_verify(NetDev *netdev, const char *filename) {
         if (t->group_name) {
                 _cleanup_(group_record_unrefp) GroupRecord *gr = NULL;
 
-                r = groupdb_by_name(t->group_name, &USERDB_MATCH_ROOT_AND_SYSTEM, USERDB_PARSE_NUMERIC, &gr);
+                r = groupdb_by_name(t->group_name, &USERDB_MATCH_ROOT_AND_SYSTEM,
+                                    USERDB_SUPPRESS_SHADOW | USERDB_PARSE_NUMERIC,
+                                    &gr);
                 if (r == -ENOEXEC)
                         log_netdev_warning_errno(netdev, r, "Group %s is not a system group, ignoring.", t->group_name);
                 else if (r < 0)

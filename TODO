@@ -66,8 +66,6 @@ Janitorial Clean-ups:
 * rework mount.c and swap.c to follow proper state enumeration/deserialization
   semantics, like we do for device.c now
 
-* get rid of basename() and replace by path_extract_filename()
-
 * Replace our fstype_is_network() with a call to libmount's mnt_fstype_is_netfs()?
   Having two lists is not nice, but maybe it's now worth making a dependency on
   libmount for something so trivial.
@@ -115,15 +113,44 @@ Deprecations and removals:
   That requires distros to enable CONFIG_ACPI_FPDT, and have kernels v5.12 for
   x86 and v6.2 for arm.
 
-* Once baseline is 4.13, remove support for INTERFACE_OLD= checks in "udevadm
-  trigger"'s waiting logic, since we can then rely on uuid-tagged uevents
-
 * In v260: remove support for deprecated FactoryReset EFI variable in
   systemd-repart, replaced by FactoryResetRequest.
 
 * Consider removing root=gpt-auto, and push people to use root=dissect instead.
 
 Features:
+
+* Add PassPidFileDescriptor= similar in style to PassCredentials= to .socket
+  units
+
+* automatically reset specific EFI vars on factory reset (make this generic
+  enough so that infrac can be used to erase shim's mok vars?)
+
+* similar: add a plugin for factory reset logic that erases certain parts of
+  the ESP, but leaves others in place.
+
+* systemd-repart: add --defer-partitions-factory-reset or so, as a flavour of
+  --defer-partitions= that picks all partitions that are marked for factory
+  reset. for an installer this is usually the partitions not to copy, too.
+
+* flush_fd() should probably try to be smart and stop reading once we know that
+  all further queued data was enqueued after flush_fd() was originally
+  called. For that, try SIOCINQ if fd refers to stream socket, and look at
+  timestamps for datagram sockets.
+
+* Similar flush_accept() should look at sockdiag queued sockets count and exit
+  once we flushed out the specified number of connections.
+
+* maybe introduce a new per-unit drop-in directory .confext.d/ that may contain
+  symlinks to confext images to enable for the unit.
+
+* nspawn: map foreign UID range through 1:1
+
+* replace most calls to sd_bus_send() by sd_bus_message_send()
+
+* replace all uses of fopen_temporary() by fopen_tmpfile_linkable() +
+  flink_tmpfile() and then get rid of fopen_temporary(). Benefit: use O_TMPFILE
+  pervasively, and avoid rename() wherever we can.
 
 * loginctl: show argv[] of "leader" process in tabular list-sessions output
 

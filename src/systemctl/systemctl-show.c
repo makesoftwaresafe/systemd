@@ -2,41 +2,49 @@
 
 #include <sys/mount.h>
 
+#include "sd-bus.h"
+#include "sd-journal.h"
+
 #include "af-list.h"
 #include "bus-error.h"
-#include "bus-locator.h"
 #include "bus-map-properties.h"
 #include "bus-print-properties.h"
 #include "bus-unit-procs.h"
+#include "bus-unit-util.h"
+#include "bus-util.h"
 #include "cgroup-show.h"
 #include "cpu-set-util.h"
 #include "errno-util.h"
 #include "exec-util.h"
 #include "exit-status.h"
-#include "fd-util.h"
 #include "format-util.h"
 #include "hexdecoct.h"
 #include "hostname-setup.h"
-#include "hostname-util.h"
 #include "in-addr-util.h"
+#include "install.h"
 #include "ip-protocol-list.h"
 #include "journal-file.h"
 #include "list.h"
-#include "locale-util.h"
+#include "logs-show.h"
 #include "memory-util.h"
 #include "numa-util.h"
 #include "open-file.h"
+#include "output-mode.h"
+#include "pager.h"
 #include "parse-util.h"
 #include "path-util.h"
 #include "pretty-print.h"
 #include "process-util.h"
+#include "set.h"
 #include "signal-util.h"
 #include "sort-util.h"
 #include "special.h"
+#include "systemctl-list-units.h"
 #include "string-table.h"
+#include "string-util.h"
+#include "strv.h"
 #include "systemctl.h"
 #include "systemctl-list-machines.h"
-#include "systemctl-list-units.h"
 #include "systemctl-show.h"
 #include "systemctl-sysv-compat.h"
 #include "systemctl-util.h"
@@ -402,7 +410,7 @@ static void print_status_info(
                 bool last = false;
 
                 STRV_FOREACH(dropin, i->dropin_paths) {
-                        _cleanup_free_ char *dropin_formatted = NULL;
+                        _cleanup_free_ char *dropin_formatted = NULL, *dropin_basename = NULL;
                         const char *df;
 
                         if (!dir || last) {
@@ -424,7 +432,13 @@ static void print_status_info(
 
                         last = ! (*(dropin + 1) && startswith(*(dropin + 1), dir));
 
-                        if (terminal_urlify_path(*dropin, basename(*dropin), &dropin_formatted) >= 0)
+                        r = path_extract_filename(*dropin, &dropin_basename);
+                        if (r < 0) {
+                                log_error_errno(r, "Failed to extract file name of '%s': %m", *dropin);
+                                break;
+                        }
+
+                        if (terminal_urlify_path(*dropin, dropin_basename, &dropin_formatted) >= 0)
                                 df = dropin_formatted;
                         else
                                 df = *dropin;

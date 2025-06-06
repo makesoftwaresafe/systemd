@@ -1,14 +1,11 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <errno.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include "alloc-util.h"
 #include "chase.h"
 #include "conf-files.h"
-#include "constants.h"
 #include "dirent-util.h"
 #include "errno-util.h"
 #include "fd-util.h"
@@ -16,14 +13,12 @@
 #include "glyph-util.h"
 #include "hashmap.h"
 #include "log.h"
-#include "macro.h"
 #include "nulstr-util.h"
 #include "path-util.h"
 #include "set.h"
 #include "stat-util.h"
 #include "string-util.h"
 #include "strv.h"
-#include "terminal-util.h"
 
 static int files_add(
                 DIR *dir,
@@ -31,7 +26,7 @@ static int files_add(
                 Hashmap **files,
                 Set **masked,
                 const char *suffix,
-                unsigned flags) {
+                ConfFilesFlags flags) {
 
         int r;
 
@@ -146,7 +141,7 @@ int conf_files_list_strv(
                 char ***ret,
                 const char *suffix,
                 const char *root,
-                unsigned flags,
+                ConfFilesFlags flags,
                 const char * const *dirs) {
 
         _cleanup_hashmap_free_ Hashmap *fh = NULL;
@@ -180,7 +175,7 @@ int conf_files_list_strv_at(
                 char ***ret,
                 const char *suffix,
                 int rfd,
-                unsigned flags,
+                ConfFilesFlags flags,
                 const char * const *dirs) {
 
         _cleanup_hashmap_free_ Hashmap *fh = NULL;
@@ -279,15 +274,15 @@ int conf_files_insert(char ***strv, const char *root, char **dirs, const char *p
         return r;
 }
 
-int conf_files_list(char ***ret, const char *suffix, const char *root, unsigned flags, const char *dir) {
+int conf_files_list(char ***ret, const char *suffix, const char *root, ConfFilesFlags flags, const char *dir) {
         return conf_files_list_strv(ret, suffix, root, flags, STRV_MAKE_CONST(dir));
 }
 
-int conf_files_list_at(char ***ret, const char *suffix, int rfd, unsigned flags, const char *dir) {
+int conf_files_list_at(char ***ret, const char *suffix, int rfd, ConfFilesFlags flags, const char *dir) {
         return conf_files_list_strv_at(ret, suffix, rfd, flags, STRV_MAKE_CONST(dir));
 }
 
-int conf_files_list_nulstr(char ***ret, const char *suffix, const char *root, unsigned flags, const char *dirs) {
+int conf_files_list_nulstr(char ***ret, const char *suffix, const char *root, ConfFilesFlags flags, const char *dirs) {
         _cleanup_strv_free_ char **d = NULL;
 
         assert(ret);
@@ -299,7 +294,7 @@ int conf_files_list_nulstr(char ***ret, const char *suffix, const char *root, un
         return conf_files_list_strv(ret, suffix, root, flags, (const char**) d);
 }
 
-int conf_files_list_nulstr_at(char ***ret, const char *suffix, int rfd, unsigned flags, const char *dirs) {
+int conf_files_list_nulstr_at(char ***ret, const char *suffix, int rfd, ConfFilesFlags flags, const char *dirs) {
         _cleanup_strv_free_ char **d = NULL;
 
         assert(ret);

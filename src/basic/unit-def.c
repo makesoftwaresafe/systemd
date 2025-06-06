@@ -2,7 +2,9 @@
 
 #include "alloc-util.h"
 #include "bus-label.h"
+#include "glyph-util.h"
 #include "string-table.h"
+#include "string-util.h"
 #include "unit-def.h"
 #include "unit-name.h"
 
@@ -213,6 +215,7 @@ static const char* const service_state_table[_SERVICE_STATE_MAX] = {
         [SERVICE_RELOAD]                     = "reload",
         [SERVICE_RELOAD_SIGNAL]              = "reload-signal",
         [SERVICE_RELOAD_NOTIFY]              = "reload-notify",
+        [SERVICE_REFRESH_EXTENSIONS]         = "refresh-extensions",
         [SERVICE_STOP]                       = "stop",
         [SERVICE_STOP_WATCHDOG]              = "stop-watchdog",
         [SERVICE_STOP_SIGTERM]               = "stop-sigterm",

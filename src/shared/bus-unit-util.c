@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include "af-list.h"
+#include <paths.h>
+#include <sys/mount.h>
+
+#include "sd-bus.h"
+
 #include "alloc-util.h"
 #include "bus-common-errors.h"
 #include "bus-error.h"
@@ -11,24 +15,21 @@
 #include "cgroup-setup.h"
 #include "cgroup-util.h"
 #include "condition.h"
+#include "constants.h"
 #include "coredump-util.h"
 #include "cpu-set-util.h"
-#include "dissect-image.h"
 #include "escape.h"
 #include "exec-util.h"
 #include "exit-status.h"
-#include "fileio.h"
+#include "extract-word.h"
 #include "firewall-util.h"
 #include "hexdecoct.h"
 #include "hostname-util.h"
 #include "in-addr-util.h"
+#include "install.h"
 #include "ioprio-util.h"
 #include "ip-protocol-list.h"
-#include "libmount-util.h"
-#include "locale-util.h"
 #include "log.h"
-#include "macro.h"
-#include "missing_fs.h"
 #include "mountpoint-util.h"
 #include "nsflags.h"
 #include "numa-util.h"
@@ -37,20 +38,17 @@
 #include "parse-util.h"
 #include "path-util.h"
 #include "percent-util.h"
+#include "pidref.h"
 #include "process-util.h"
 #include "rlimit-util.h"
 #include "seccomp-util.h"
 #include "securebits-util.h"
 #include "signal-util.h"
 #include "socket-util.h"
-#include "sort-util.h"
-#include "stdio-util.h"
 #include "string-util.h"
 #include "syslog-util.h"
-#include "terminal-util.h"
+#include "time-util.h"
 #include "unit-def.h"
-#include "user-util.h"
-#include "utf8.h"
 
 int bus_parse_unit_info(sd_bus_message *message, UnitInfo *u) {
         assert(message);
@@ -71,6 +69,11 @@ int bus_parse_unit_info(sd_bus_message *message, UnitInfo *u) {
                         &u->job_id,
                         &u->job_type,
                         &u->job_path);
+}
+
+static int warn_deprecated(const char *field, const char *eq) {
+        log_warning("D-Bus property %s is deprecated, ignoring assignment: %s=%s", field, field, eq);
+        return 1;
 }
 
 #define DEFINE_BUS_APPEND_PARSE_PTR(bus_type, cast_type, type, parse_func) \
@@ -592,8 +595,7 @@ static int bus_append_cgroup_property(sd_bus_message *m, const char *field, cons
                 return 1;
         }
 
-        if (STR_IN_SET(field, "CPUAccounting",
-                              "MemoryAccounting",
+        if (STR_IN_SET(field, "MemoryAccounting",
                               "MemoryZSwapWriteback",
                               "IOAccounting",
                               "TasksAccounting",
@@ -1030,6 +1032,19 @@ static int bus_append_cgroup_property(sd_bus_message *m, const char *field, cons
                 /* While infinity is disallowed in unit file, infinity is allowed in D-Bus API which
                  * means use the default memory pressure duration from oomd.conf. */
                 return bus_append_parse_sec_rename(m, field, isempty(eq) ? "infinity" : eq);
+
+        if (STR_IN_SET(field,
+                       "MemoryLimit",
+                       "CPUShares",
+                       "StartupCPUShares",
+                       "BlockIOAccounting",
+                       "BlockIOWeight",
+                       "StartupBlockIOWeight",
+                       "BlockIODeviceWeight",
+                       "BlockIOReadBandwidth",
+                       "BlockIOWriteBandwidth",
+                       "CPUAccounting"))
+                return warn_deprecated(field, eq);
 
         return 0;
 }

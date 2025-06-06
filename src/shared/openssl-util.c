@@ -1,7 +1,5 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <endian.h>
-
 #include "alloc-util.h"
 #include "ask-password-api.h"
 #include "fd-util.h"
@@ -1084,6 +1082,8 @@ int digest_and_sign(
                 const void *data, size_t size,
                 void **ret, size_t *ret_size) {
 
+        int r;
+
         assert(privkey);
         assert(ret);
         assert(ret_size);
@@ -1101,8 +1101,13 @@ int digest_and_sign(
         if (!mdctx)
                 return log_openssl_errors("Failed to create new EVP_MD_CTX");
 
-        if (EVP_DigestSignInit(mdctx, NULL, md, NULL, privkey) != 1)
-                return log_openssl_errors("Failed to initialize signature context");
+        if (EVP_DigestSignInit(mdctx, NULL, md, NULL, privkey) != 1) {
+                /* Distro security policies often disable support for SHA-1. Let's return a recognizable
+                 * error for that case. */
+                bool invalid_digest = ERR_GET_REASON(ERR_peek_last_error()) == EVP_R_INVALID_DIGEST;
+                r = log_openssl_errors("Failed to initialize signature context");
+                return invalid_digest ? -EADDRNOTAVAIL : r;
+}
 
         /* Determine signature size */
         size_t ss;

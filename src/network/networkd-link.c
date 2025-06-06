@@ -5,38 +5,38 @@
 #include <linux/if_link.h>
 #include <linux/netdevice.h>
 #include <net/if.h>
-#include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "sd-bus.h"
+#include "sd-dhcp-client.h"
+#include "sd-dhcp-server.h"
+#include "sd-dhcp6-client.h"
+#include "sd-dhcp6-lease.h"
+#include "sd-ipv4ll.h"
+#include "sd-lldp-rx.h"
+#include "sd-ndisc.h"
+#include "sd-netlink.h"
+#include "sd-radv.h"
+
 #include "alloc-util.h"
 #include "arphrd-util.h"
-#include "batadv.h"
 #include "bitfield.h"
-#include "bond.h"
-#include "bridge.h"
-#include "bus-util.h"
-#include "device-private.h"
 #include "device-util.h"
-#include "dhcp-lease-internal.h"
-#include "env-file.h"
+#include "errno-util.h"
 #include "ethtool-util.h"
 #include "event-util.h"
-#include "fd-util.h"
-#include "fileio.h"
 #include "format-ifname.h"
 #include "fs-util.h"
 #include "glyph-util.h"
 #include "logarithm.h"
-#include "missing_network.h"
+#include "netif-util.h"
 #include "netlink-util.h"
-#include "network-internal.h"
 #include "networkd-address.h"
 #include "networkd-address-label.h"
 #include "networkd-bridge-fdb.h"
 #include "networkd-bridge-mdb.h"
 #include "networkd-bridge-vlan.h"
-#include "networkd-can.h"
 #include "networkd-dhcp-prefix-delegation.h"
 #include "networkd-dhcp-server.h"
 #include "networkd-dhcp4.h"
@@ -61,16 +61,15 @@
 #include "networkd-state-file.h"
 #include "networkd-sysctl.h"
 #include "networkd-wifi.h"
+#include "ordered-set.h"
 #include "parse-util.h"
 #include "set.h"
 #include "socket-util.h"
-#include "stdio-util.h"
 #include "string-table.h"
+#include "string-util.h"
 #include "strv.h"
 #include "tc.h"
-#include "tuntap.h"
 #include "udev-util.h"
-#include "vrf.h"
 
 void link_required_operstate_for_online(Link *link, LinkOperationalStateRange *ret) {
         assert(link);
@@ -2098,6 +2097,11 @@ void link_update_operstate(Link *link, bool also_update_master) {
         }
 }
 
+bool link_has_carrier(Link *link) {
+        assert(link);
+        return netif_has_carrier(link->kernel_operstate, link->flags);
+}
+
 #define FLAG_STRING(string, flag, old, new)                      \
         (((old ^ new) & flag)                                    \
          ? ((old & flag) ? (" -" string) : (" +" string))        \
@@ -2201,8 +2205,8 @@ static int link_update_master(Link *link, sd_netlink_message *message) {
 
         r = sd_netlink_message_read_u32(message, IFLA_MASTER, (uint32_t*) &master_ifindex);
         if (r == -ENODATA)
-                return 0;
-        if (r < 0)
+                master_ifindex = 0; /* no master interface */
+        else if (r < 0)
                 return log_link_debug_errno(link, r, "rtnl: failed to read master ifindex: %m");
 
         if (master_ifindex == link->ifindex)
@@ -2219,6 +2223,9 @@ static int link_update_master(Link *link, sd_netlink_message *message) {
 
                 link_drop_from_master(link);
                 link->master_ifindex = master_ifindex;
+
+                /* Updating master ifindex may cause operational state change, e.g. carrier <-> enslaved */
+                link_dirty(link);
         }
 
         r = link_append_to_master(link);
