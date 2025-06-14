@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <errno.h>
 #include <sys/socket.h>
 
 #include "dns-type.h"
@@ -15,8 +14,8 @@ typedef const struct {
 static const struct dns_type_name *
 lookup_dns_type (register const char *str, register GPERF_LEN_TYPE len);
 
-#include "dns_type-from-name.h"
-#include "dns_type-to-name.h"
+#include "dns_type-from-name.inc"
+#include "dns_type-to-name.inc"
 
 int dns_type_from_string(const char *s) {
         const struct dns_type_name *sc;

@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <stdlib.h>
-#include <sys/wait.h>
 
 #include "sd-daemon.h"
 
@@ -248,7 +247,7 @@ static int start_workers(Manager *m, bool explicit_request) {
                                                 &m->deferred_start_worker_event_source,
                                                 CLOCK_MONOTONIC,
                                                 ratelimit_end(&m->worker_ratelimit),
-                                                /* accuracy_usec= */ 0,
+                                                /* accuracy= */ 0,
                                                 on_deferred_start_worker,
                                                 m);
                                 if (r < 0)

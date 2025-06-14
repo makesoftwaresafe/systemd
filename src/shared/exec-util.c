@@ -1,10 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <dirent.h>
-#include <errno.h>
 #include <stdio.h>
-#include <sys/prctl.h>
-#include <sys/types.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 #include "alloc-util.h"
@@ -18,18 +15,16 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "hashmap.h"
-#include "macro.h"
-#include "missing_syscall.h"
+#include "log.h"
 #include "path-util.h"
 #include "process-util.h"
 #include "serialize.h"
-#include "set.h"
-#include "signal-util.h"
 #include "stat-util.h"
 #include "string-table.h"
 #include "string-util.h"
 #include "strv.h"
 #include "terminal-util.h"
+#include "time-util.h"
 
 #define EXIT_SKIP_REMAINING 77
 
@@ -312,7 +307,12 @@ int execute_directories(
 
         assert(!strv_isempty((char* const*) directories));
 
-        r = conf_files_list_strv(&paths, NULL, NULL, CONF_FILES_EXECUTABLE|CONF_FILES_REGULAR|CONF_FILES_FILTER_MASKED, directories);
+        r = conf_files_list_strv(
+                        &paths,
+                        /* suffix= */ NULL,
+                        /* root= */ NULL,
+                        CONF_FILES_EXECUTABLE|CONF_FILES_REGULAR|CONF_FILES_FILTER_MASKED,
+                        directories);
         if (r < 0)
                 return log_error_errno(r, "Failed to enumerate executables: %m");
 
@@ -595,7 +595,7 @@ int _fork_agent(const char *name, char * const *argv, const int except[], size_t
                  * stdin around. */
                 fd = open_terminal("/dev/tty", stdin_is_tty ? O_WRONLY : (stdout_is_tty && stderr_is_tty) ? O_RDONLY : O_RDWR);
                 if (fd < 0) {
-                        log_error_errno(fd, "Failed to open /dev/tty: %m");
+                        log_error_errno(fd, "Failed to open %s: %m", "/dev/tty");
                         _exit(EXIT_FAILURE);
                 }
 

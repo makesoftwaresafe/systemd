@@ -2,9 +2,13 @@
 
 #include <ctype.h>
 #include <fnmatch.h>
+#include <unistd.h>
+
+#include "sd-json.h"
 
 #include "alloc-util.h"
 #include "architecture.h"
+#include "chase.h"
 #include "conf-files.h"
 #include "conf-parser.h"
 #include "confidential-virt.h"
@@ -12,6 +16,7 @@
 #include "device-private.h"
 #include "device-util.h"
 #include "dirent-util.h"
+#include "errno-util.h"
 #include "escape.h"
 #include "extract-word.h"
 #include "fd-util.h"
@@ -19,9 +24,9 @@
 #include "format-util.h"
 #include "fs-util.h"
 #include "glob-util.h"
+#include "hashmap.h"
 #include "list.h"
 #include "memstream-util.h"
-#include "mkdir.h"
 #include "netif-naming-scheme.h"
 #include "nulstr-util.h"
 #include "parse-util.h"
@@ -30,6 +35,7 @@
 #include "socket-util.h"
 #include "stat-util.h"
 #include "string-table.h"
+#include "string-util.h"
 #include "strv.h"
 #include "strxcpyx.h"
 #include "sysctl-util.h"
@@ -44,6 +50,8 @@
 #include "udev-trace.h"
 #include "udev-util.h"
 #include "udev-worker.h"
+#include "user-record.h"
+#include "user-util.h"
 #include "userdb.h"
 #include "virt.h"
 
@@ -501,7 +509,9 @@ static int rule_resolve_user(UdevRuleLine *rule_line, const char *name, uid_t *r
         }
 
         _cleanup_(user_record_unrefp) UserRecord *ur = NULL;
-        r = userdb_by_name(name, &USERDB_MATCH_ROOT_AND_SYSTEM, USERDB_PARSE_NUMERIC | USERDB_SYNTHESIZE_NUMERIC, &ur);
+        r = userdb_by_name(name, &USERDB_MATCH_ROOT_AND_SYSTEM,
+                           USERDB_SUPPRESS_SHADOW | USERDB_PARSE_NUMERIC | USERDB_SYNTHESIZE_NUMERIC,
+                           &ur);
         if (r == -ESRCH)
                 return log_line_error_errno(rule_line, r, "Unknown user '%s', ignoring.", name);
         if (r == -ENOEXEC)
@@ -536,7 +546,9 @@ static int rule_resolve_group(UdevRuleLine *rule_line, const char *name, gid_t *
         }
 
         _cleanup_(group_record_unrefp) GroupRecord *gr = NULL;
-        r = groupdb_by_name(name, &USERDB_MATCH_ROOT_AND_SYSTEM, USERDB_PARSE_NUMERIC | USERDB_SYNTHESIZE_NUMERIC, &gr);
+        r = groupdb_by_name(name, &USERDB_MATCH_ROOT_AND_SYSTEM,
+                            USERDB_SUPPRESS_SHADOW | USERDB_PARSE_NUMERIC | USERDB_SYNTHESIZE_NUMERIC,
+                            &gr);
         if (r == -ESRCH)
                 return log_line_error_errno(rule_line, r, "Unknown group '%s', ignoring.", name);
         if (r == -ENOEXEC)
@@ -2666,7 +2678,9 @@ static int udev_rule_apply_token_to_event(
                         return true;
 
                 _cleanup_(user_record_unrefp) UserRecord *ur = NULL;
-                r = userdb_by_name(owner, &USERDB_MATCH_ROOT_AND_SYSTEM, USERDB_PARSE_NUMERIC | USERDB_SYNTHESIZE_NUMERIC, &ur);
+                r = userdb_by_name(owner, &USERDB_MATCH_ROOT_AND_SYSTEM,
+                                   USERDB_SUPPRESS_SHADOW | USERDB_PARSE_NUMERIC | USERDB_SYNTHESIZE_NUMERIC,
+                                   &ur);
                 if (r == -ESRCH)
                         log_event_error_errno(event, token, r, "Unknown user \"%s\", ignoring.", owner);
                 else if (r == -ENOEXEC)
@@ -2692,7 +2706,9 @@ static int udev_rule_apply_token_to_event(
                         return true;
 
                 _cleanup_(group_record_unrefp) GroupRecord *gr = NULL;
-                r = groupdb_by_name(group, &USERDB_MATCH_ROOT_AND_SYSTEM, USERDB_PARSE_NUMERIC | USERDB_SYNTHESIZE_NUMERIC, &gr);
+                r = groupdb_by_name(group, &USERDB_MATCH_ROOT_AND_SYSTEM,
+                                    USERDB_SUPPRESS_SHADOW | USERDB_PARSE_NUMERIC | USERDB_SYNTHESIZE_NUMERIC,
+                                    &gr);
                 if (r == -ESRCH)
                         log_event_error_errno(event, token, r, "Unknown group \"%s\", ignoring.", group);
                 else if (r == -ENOEXEC)

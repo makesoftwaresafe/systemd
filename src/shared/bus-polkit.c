@@ -1,13 +1,18 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include "bus-internal.h"
+#include "sd-bus.h"
+#include "sd-event.h"
+
 #include "bus-message.h"
 #include "bus-polkit.h"
 #include "bus-util.h"
+#include "errno-util.h"
+#include "hashmap.h"
+#include "list.h"
 #include "log.h"
-#include "process-util.h"
+#include "pidref.h"
+#include "string-util.h"
 #include "strv.h"
-#include "user-util.h"
 #include "varlink-util.h"
 
 static int bus_message_check_good_user(sd_bus_message *m, uid_t good_user) {
@@ -318,7 +323,8 @@ static int async_polkit_read_reply(sd_bus_message *reply, AsyncPolkitQuery *q) {
         } else if (challenge) {
                 log_debug("Polkit authorization for action '%s' requires interactive authentication, which we didn't allow.", a->action);
                 q->error_action = TAKE_PTR(a);
-                sd_bus_error_set_const(&q->error, SD_BUS_ERROR_INTERACTIVE_AUTHORIZATION_REQUIRED, "Interactive authentication required.");
+                sd_bus_error_set_const(&q->error, SD_BUS_ERROR_INTERACTIVE_AUTHORIZATION_REQUIRED,
+                                       "Access denied as the requested operation requires interactive authentication. However, interactive authentication has not been enabled by the calling program.");
         } else {
                 log_debug("Polkit authorization for action '%s' denied.", a->action);
                 q->denied_action = TAKE_PTR(a);

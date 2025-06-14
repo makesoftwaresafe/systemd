@@ -6,8 +6,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/file.h>
-#include <sys/ioctl.h>
-#include <sys/mount.h>
 
 #include "sd-device.h"
 
@@ -1295,7 +1293,7 @@ static const char *pick_color_for_uid_gid(uid_t uid) {
                 return ansi_highlight_yellow4(); /* files should never be owned by 'nobody' (but might happen due to userns mapping) */
         if (uid_is_system(uid))
                 return ansi_normal();            /* files in disk images are typically owned by root and other system users, no issue there */
-        if (uid_is_dynamic(uid))
+        if (uid_is_dynamic(uid) || uid_is_greeter(uid))
                 return ansi_highlight_red();     /* files should never be owned persistently by dynamic users, and there are just no excuses */
         if (uid_is_container(uid) || uid_is_foreign(uid))
                 return ansi_highlight_cyan();
@@ -1975,16 +1973,10 @@ static int action_with(DissectedImage *m, LoopDevice *d) {
 
 static int action_discover(void) {
         _cleanup_hashmap_free_ Hashmap *images = NULL;
-        _cleanup_(table_unrefp) Table *t = NULL;
-        Image *img;
         int r;
 
-        images = hashmap_new(&image_hash_ops);
-        if (!images)
-                return log_oom();
-
         for (ImageClass cl = 0; cl < _IMAGE_CLASS_MAX; cl++) {
-                r = image_discover(arg_runtime_scope, cl, NULL, images);
+                r = image_discover(arg_runtime_scope, cl, NULL, &images);
                 if (r < 0)
                         return log_error_errno(r, "Failed to discover images: %m");
         }
@@ -1994,13 +1986,14 @@ static int action_discover(void) {
                 return 0;
         }
 
-        t = table_new("name", "type", "class", "ro", "path", "time", "usage");
+        _cleanup_(table_unrefp) Table *t = table_new("name", "type", "class", "ro", "path", "time", "usage");
         if (!t)
                 return log_oom();
 
         table_set_align_percent(t, table_get_cell(t, 0, 6), 100);
         table_set_ersatz_string(t, TABLE_ERSATZ_DASH);
 
+        Image *img;
         HASHMAP_FOREACH(img, images) {
 
                 if (!arg_all && startswith(img->name, "."))

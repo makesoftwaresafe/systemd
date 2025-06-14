@@ -3,20 +3,24 @@
 #include <math.h>
 
 #include "alloc-util.h"
+#include "bitmap.h"
 #include "dns-domain.h"
 #include "dns-type.h"
 #include "escape.h"
+#include "hash-funcs.h"
 #include "hexdecoct.h"
 #include "json-util.h"
-#include "log.h"
 #include "memory-util.h"
+#include "resolved-dns-answer.h"
 #include "resolved-dns-dnssec.h"
 #include "resolved-dns-packet.h"
 #include "resolved-dns-rr.h"
+#include "siphash24.h"
 #include "string-table.h"
 #include "string-util.h"
 #include "strv.h"
 #include "terminal-util.h"
+#include "time-util.h"
 #include "unaligned.h"
 
 DnsResourceKey* dns_resource_key_new(uint16_t class, uint16_t type, const char *name) {
@@ -1351,9 +1355,9 @@ const char* dns_resource_record_to_string(DnsResourceRecord *rr) {
         return TAKE_PTR(s);
 }
 
-ssize_t dns_resource_record_payload(DnsResourceRecord *rr, void **out) {
+ssize_t dns_resource_record_payload(DnsResourceRecord *rr, const void **ret) {
         assert(rr);
-        assert(out);
+        assert(ret);
 
         switch (rr->unparsable ? _DNS_TYPE_INVALID : rr->key->type) {
         case DNS_TYPE_SRV:
@@ -1364,8 +1368,6 @@ ssize_t dns_resource_record_payload(DnsResourceRecord *rr, void **out) {
         case DNS_TYPE_HINFO:
         case DNS_TYPE_SPF:
         case DNS_TYPE_TXT:
-        case DNS_TYPE_A:
-        case DNS_TYPE_AAAA:
         case DNS_TYPE_SOA:
         case DNS_TYPE_MX:
         case DNS_TYPE_LOC:
@@ -1376,17 +1378,25 @@ ssize_t dns_resource_record_payload(DnsResourceRecord *rr, void **out) {
         case DNS_TYPE_NSEC3:
                 return -EINVAL;
 
+        case DNS_TYPE_A:
+                *ret = &rr->a.in_addr;
+                return sizeof(rr->a.in_addr);
+
+        case DNS_TYPE_AAAA:
+                *ret = &rr->aaaa.in6_addr;
+                return sizeof(rr->aaaa.in6_addr);
+
         case DNS_TYPE_SSHFP:
-                *out = rr->sshfp.fingerprint;
+                *ret = rr->sshfp.fingerprint;
                 return rr->sshfp.fingerprint_size;
 
         case DNS_TYPE_TLSA:
-                *out = rr->tlsa.data;
+                *ret = rr->tlsa.data;
                 return rr->tlsa.data_size;
 
         case DNS_TYPE_OPENPGPKEY:
         default:
-                *out = rr->generic.data;
+                *ret = rr->generic.data;
                 return rr->generic.data_size;
         }
 }

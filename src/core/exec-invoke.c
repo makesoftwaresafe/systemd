@@ -1,8 +1,11 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
+#include <grp.h>
+#include <linux/ioprio.h>
 #include <linux/prctl.h>
 #include <linux/sched.h>
 #include <linux/securebits.h>
+#include <poll.h>
 #include <sys/eventfd.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
@@ -10,7 +13,6 @@
 
 #if HAVE_PAM
 #include <security/pam_appl.h>
-#include <security/pam_misc.h>
 #endif
 
 #include "sd-messages.h"
@@ -24,12 +26,14 @@
 #include "bpf-restrict-fs.h"
 #include "btrfs-util.h"
 #include "capability-util.h"
-#include "cgroup.h"
 #include "cgroup-setup.h"
+#include "cgroup.h"
 #include "chase.h"
-#include "chattr-util.h"
 #include "chown-recursive.h"
+#include "constants.h"
 #include "copy.h"
+#include "coredump-util.h"
+#include "dissect-image.h"
 #include "dynamic-user.h"
 #include "env-util.h"
 #include "escape.h"
@@ -38,11 +42,11 @@
 #include "execute.h"
 #include "exit-status.h"
 #include "fd-util.h"
+#include "fs-util.h"
 #include "hexdecoct.h"
 #include "hostname-setup.h"
 #include "image-policy.h"
 #include "io-util.h"
-#include "ioprio-util.h"
 #include "iovec-util.h"
 #include "journal-send.h"
 #include "manager.h"
@@ -51,16 +55,23 @@
 #include "missing_syscall.h"
 #include "mkdir-label.h"
 #include "mount-util.h"
+#include "namespace-util.h"
+#include "nsflags.h"
+#include "open-file.h"
 #include "osc-context.h"
+#include "path-util.h"
+#include "pidref.h"
 #include "proc-cmdline.h"
 #include "process-util.h"
 #include "psi-util.h"
 #include "rlimit-util.h"
 #include "seccomp-util.h"
 #include "selinux-util.h"
+#include "set.h"
 #include "signal-util.h"
 #include "smack-util.h"
 #include "socket-util.h"
+#include "stat-util.h"
 #include "string-table.h"
 #include "strv.h"
 #include "terminal-util.h"
@@ -124,23 +135,6 @@ static bool is_kmsg_output(ExecOutput o) {
         return IN_SET(o,
                       EXEC_OUTPUT_KMSG,
                       EXEC_OUTPUT_KMSG_AND_CONSOLE);
-}
-
-static bool exec_context_needs_term(const ExecContext *c) {
-        assert(c);
-
-        /* Return true if the execution context suggests we should set $TERM to something useful. */
-
-        if (is_terminal_input(c->std_input))
-                return true;
-
-        if (is_terminal_output(c->std_output))
-                return true;
-
-        if (is_terminal_output(c->std_error))
-                return true;
-
-        return !!c->tty_path;
 }
 
 static int open_null_as(int flags, int nfd) {
@@ -1183,14 +1177,56 @@ static int pam_close_session_and_delete_credentials(pam_handle_t *handle, int fl
 }
 #endif
 
+static int attach_to_subcgroup(
+                const ExecContext *context,
+                const CGroupContext *cgroup_context,
+                const ExecParameters *params,
+                const char *prefix) {
+
+        _cleanup_free_ char *subgroup = NULL;
+        int r;
+
+        assert(context);
+        assert(cgroup_context);
+        assert(params);
+
+        /* If we're a control process that needs a subgroup, we've already been spawned into it as otherwise
+         * we'd violate the "no inner processes" rule, so no need to do anything. */
+        if (exec_params_needs_control_subcgroup(params))
+                return 0;
+
+        r = exec_params_get_cgroup_path(params, cgroup_context, prefix, &subgroup);
+        if (r < 0)
+                return log_error_errno(r, "Failed to acquire cgroup path: %m");
+        /* No subgroup required? Then there's nothing to do. */
+        if (r == 0)
+                return 0;
+
+        r = cg_attach(subgroup, 0);
+        if (r == -EUCLEAN)
+                return log_error_errno(r,
+                                "Failed to attach process " PID_FMT " to cgroup '%s', "
+                                "because the cgroup or one of its parents or "
+                                "siblings is in the threaded mode.",
+                                getpid_cached(), subgroup);
+        if (r < 0)
+                return log_error_errno(r,
+                                "Failed to attach process " PID_FMT " to cgroup %s: %m",
+                                getpid_cached(), subgroup);
+
+        return 0;
+}
+
 static int setup_pam(
                 const ExecContext *context,
+                const CGroupContext *cgroup_context,
                 ExecParameters *params,
                 const char *user,
                 uid_t uid,
                 gid_t gid,
                 char ***env, /* updated on success */
                 const int fds[], size_t n_fds,
+                bool needs_sandboxing,
                 int exec_fd) {
 
 #if HAVE_PAM
@@ -1295,6 +1331,15 @@ static int setup_pam(
                 goto fail;
         if (r == 0) {
                 int ret = EXIT_PAM;
+
+                if (needs_sandboxing && exec_needs_cgroup_namespace(context) && params->cgroup_path) {
+                        /* Move PAM process into subgroup immediately if the main process hasn't been moved
+                         * into the subgroup yet (when cgroup namespacing is enabled) and a subgroup is
+                         * configured. */
+                        r = attach_to_subcgroup(context, cgroup_context, params, params->cgroup_path);
+                        if (r < 0)
+                                return r;
+                }
 
                 /* The child's job is to reset the PAM session on termination */
                 barrier_set_role(&barrier, BARRIER_CHILD);
@@ -1921,8 +1966,8 @@ static int build_environment(
         assert(cgroup_context);
         assert(ret);
 
-#define N_ENV_VARS 22
-        our_env = new0(char*, N_ENV_VARS + _EXEC_DIRECTORY_TYPE_MAX);
+#define N_ENV_VARS 19
+        our_env = new0(char*, N_ENV_VARS + _EXEC_DIRECTORY_TYPE_MAX + 1);
         if (!our_env)
                 return -ENOMEM;
 
@@ -2023,61 +2068,6 @@ static int build_environment(
                 if (!x)
                         return -ENOMEM;
 
-                our_env[n_env++] = x;
-        }
-
-        if (exec_context_needs_term(c)) {
-                _cleanup_free_ char *cmdline = NULL;
-                const char *tty_path, *term = NULL;
-
-                tty_path = exec_context_tty_path(c);
-
-                /* If we are forked off PID 1 and we are supposed to operate on /dev/console, then let's try
-                 * to inherit the $TERM set for PID 1. This is useful for containers so that the $TERM the
-                 * container manager passes to PID 1 ends up all the way in the console login shown. */
-
-                if (path_equal(tty_path, "/dev/console") && getppid() == 1)
-                        term = getenv("TERM");
-                else if (tty_path && in_charset(skip_dev_prefix(tty_path), ALPHANUMERICAL)) {
-                        _cleanup_free_ char *key = NULL;
-
-                        key = strjoin("systemd.tty.term.", skip_dev_prefix(tty_path));
-                        if (!key)
-                                return -ENOMEM;
-
-                        r = proc_cmdline_get_key(key, 0, &cmdline);
-                        if (r < 0)
-                                log_debug_errno(r, "Failed to read %s from kernel cmdline, ignoring: %m", key);
-                        else if (r > 0)
-                                term = cmdline;
-                }
-
-                if (!term) {
-                        /* If no precise $TERM is known and we pick a fallback default, then let's also set
-                         * $COLORTERM=truecolor. That's because our fallback default is vt220, which is
-                         * generally a safe bet (as it supports PageUp/PageDown unlike vt100, and is quite
-                         * universally available in terminfo/termcap), except for the fact that real DEC
-                         * vt220 gear never actually supported color. Most tools these days generate color on
-                         * vt220 anyway, ignoring the physical capabilities of the real hardware, but some
-                         * tools actually believe in the historical truth. Which is unfortunate since *we*
-                         * *don't* care about the historical truth, we just want sane defaults if nothing
-                         * better is explicitly configured. It's 2025 after all, at the time of writing,
-                         * pretty much all terminal emulators actually *do* support color, hence if we don't
-                         * know any better let's explicitly claim color support via $COLORTERM. Or in other
-                         * words: we now explicitly claim to be connected to a franken-vt220 with true color
-                         * support. */
-                        x = strdup("COLORTERM=truecolor");
-                        if (!x)
-                                return -ENOMEM;
-
-                        our_env[n_env++] = x;
-
-                        term = default_term_for_tty(tty_path);
-                }
-
-                x = strjoin("TERM=", term);
-                if (!x)
-                        return -ENOMEM;
                 our_env[n_env++] = x;
         }
 
@@ -2182,7 +2172,7 @@ static int build_environment(
         }
 
         assert(c->private_var_tmp >= 0 && c->private_var_tmp < _PRIVATE_TMP_MAX);
-        if (c->private_tmp != c->private_var_tmp) {
+        if (needs_sandboxing && c->private_tmp != c->private_var_tmp) {
                 assert(c->private_tmp == PRIVATE_TMP_DISCONNECTED);
                 assert(c->private_var_tmp == PRIVATE_TMP_NO);
 
@@ -2196,7 +2186,7 @@ static int build_environment(
                 our_env[n_env++] = x;
         }
 
-        assert(n_env < N_ENV_VARS + _EXEC_DIRECTORY_TYPE_MAX);
+        assert(n_env <= N_ENV_VARS + _EXEC_DIRECTORY_TYPE_MAX);
 #undef N_ENV_VARS
 
         *ret = TAKE_PTR(our_env);
@@ -3602,7 +3592,7 @@ static int apply_mount_namespace(
                 .private_dev = needs_sandboxing && context->private_devices,
                 .private_network = needs_sandboxing && exec_needs_network_namespace(context),
                 .private_ipc = needs_sandboxing && exec_needs_ipc_namespace(context),
-                .private_pids = needs_sandboxing && exec_needs_pid_namespace(context) ? context->private_pids : PRIVATE_PIDS_NO,
+                .private_pids = needs_sandboxing && exec_needs_pid_namespace(context, params) ? context->private_pids : PRIVATE_PIDS_NO,
                 .private_tmp = needs_sandboxing ? context->private_tmp : PRIVATE_TMP_NO,
                 .private_var_tmp = needs_sandboxing ? context->private_var_tmp : PRIVATE_TMP_NO,
 
@@ -4163,7 +4153,7 @@ static void log_command_line(
                    LOG_EXEC_INVOCATION_ID(params));
 }
 
-static bool exec_context_needs_cap_sys_admin(const ExecContext *context) {
+static bool exec_needs_cap_sys_admin(const ExecContext *context, const ExecParameters *params) {
         assert(context);
 
         return context->private_users != PRIVATE_USERS_NO ||
@@ -4182,7 +4172,7 @@ static bool exec_context_needs_cap_sys_admin(const ExecContext *context) {
                !strv_isempty(context->extension_directories) ||
                context->protect_system != PROTECT_SYSTEM_NO ||
                context->protect_home != PROTECT_HOME_NO ||
-               exec_needs_pid_namespace(context) ||
+               exec_needs_pid_namespace(context, params) ||
                context->protect_kernel_tunables ||
                context->protect_kernel_modules ||
                context->protect_kernel_logs ||
@@ -4227,7 +4217,7 @@ static bool exec_namespace_is_delegated(
         /* If we need unprivileged private users, we've already unshared a user namespace by the time we call
          * setup_delegated_namespaces() for the first time so let's make sure we do all other namespace
          * unsharing in the first call to setup_delegated_namespaces() by returning false here. */
-        if (!have_cap_sys_admin && exec_context_needs_cap_sys_admin(context))
+        if (!have_cap_sys_admin && exec_needs_cap_sys_admin(context, params))
                 return false;
 
         if (context->delegate_namespaces == NAMESPACE_FLAGS_INITIAL)
@@ -4330,7 +4320,7 @@ static int setup_delegated_namespaces(
 
         /* Unshare a new PID namespace before setting up mounts to ensure /proc/ is mounted with only processes in PID namespace visible.
          * Note PrivatePIDs=yes implies MountAPIVFS=yes so we'll always ensure procfs is remounted. */
-        if (needs_sandboxing && exec_needs_pid_namespace(context) &&
+        if (needs_sandboxing && exec_needs_pid_namespace(context, params) &&
             exec_namespace_is_delegated(context, params, have_cap_sys_admin, CLONE_NEWPID) == delegate) {
                 if (params->pidref_transport_fd < 0) {
                         *reterr_exit_status = EXIT_NAMESPACE;
@@ -4578,6 +4568,96 @@ static void prepare_terminal(
 
         if (use_ansi)
                 (void) osc_context_open_service(p->unit_id, p->invocation_id, /* ret_seq= */ NULL);
+}
+
+static int setup_term_environment(const ExecContext *context, char ***env) {
+        int r;
+
+        assert(context);
+        assert(env);
+
+        /* Already specified by user? */
+        if (strv_env_get(*env, "TERM"))
+                return 0;
+
+        /* Do we need $TERM at all? */
+        if (!is_terminal_input(context->std_input) &&
+            !is_terminal_output(context->std_output) &&
+            !is_terminal_output(context->std_error) &&
+            !context->tty_path)
+                return 0;
+
+        const char *tty_path = exec_context_tty_path(context);
+        if (tty_path) {
+                /* If we are forked off PID 1 and we are supposed to operate on /dev/console, then let's try
+                 * to inherit the $TERM set for PID 1. This is useful for containers so that the $TERM the
+                 * container manager passes to PID 1 ends up all the way in the console login shown.
+                 *
+                 * Note that if this doesn't work out we won't bother with querying systemd.tty.term.console
+                 * kernel cmdline option or DCS anymore either, because pid1 also imports $TERM based on those
+                 * and it should have showed up as our $TERM if there were anything. */
+                if (tty_is_console(tty_path) && getppid() == 1) {
+                        const char *term = strv_find_prefix(environ, "TERM=");
+                        if (term) {
+                                r = strv_env_replace_strdup(env, term);
+                                if (r < 0)
+                                        return r;
+
+                                FOREACH_STRING(i, "COLORTERM=", "NO_COLOR=") {
+                                        const char *s = strv_find_prefix(environ, i);
+                                        if (!s)
+                                                continue;
+
+                                        r = strv_env_replace_strdup(env, s);
+                                        if (r < 0)
+                                                return r;
+                                }
+
+                                return 1;
+                        }
+
+                } else {
+                        if (in_charset(skip_dev_prefix(tty_path), ALPHANUMERICAL)) {
+                                _cleanup_free_ char *key = NULL, *cmdline = NULL;
+
+                                key = strjoin("systemd.tty.term.", skip_dev_prefix(tty_path));
+                                if (!key)
+                                        return -ENOMEM;
+
+                                r = proc_cmdline_get_key(key, /* flags = */ 0, &cmdline);
+                                if (r > 0)
+                                        return strv_env_assign(env, "TERM", cmdline);
+                                if (r < 0)
+                                        log_debug_errno(r, "Failed to read '%s' from kernel cmdline, ignoring: %m", key);
+                        }
+
+                        /* This handles real virtual terminals (returning "linux") and
+                         * any terminals which support the DCS +q query sequence. */
+                        _cleanup_free_ char *dcs_term = NULL;
+                        r = query_term_for_tty(tty_path, &dcs_term);
+                        if (r >= 0)
+                                return strv_env_assign(env, "TERM", dcs_term);
+                }
+        }
+
+        /* If $TERM is not known and we pick a fallback default, then let's also set
+         * $COLORTERM=truecolor. That's because our fallback default is vt220, which is
+         * generally a safe bet (as it supports PageUp/PageDown unlike vt100, and is quite
+         * universally available in terminfo/termcap), except for the fact that real DEC
+         * vt220 gear never actually supported color. Most tools these days generate color on
+         * vt220 anyway, ignoring the physical capabilities of the real hardware, but some
+         * tools actually believe in the historical truth. Which is unfortunate since *we*
+         * *don't* care about the historical truth, we just want sane defaults if nothing
+         * better is explicitly configured. It's 2025 after all, at the time of writing,
+         * pretty much all terminal emulators actually *do* support color, hence if we don't
+         * know any better let's explicitly claim color support via $COLORTERM. Or in other
+         * words: we now explicitly claim to be connected to a franken-vt220 with true color
+         * support. */
+        r = strv_env_replace_strdup(env, "COLORTERM=truecolor");
+        if (r < 0)
+                return r;
+
+        return strv_env_replace_strdup(env, "TERM=" FALLBACK_TERM);
 }
 
 int exec_invoke(
@@ -4882,28 +4962,48 @@ int exec_invoke(
         if (socket_fd >= 0)
                 (void) fd_nonblock(socket_fd, false);
 
+        /* We need sandboxing if the caller asked us to apply it and the command isn't explicitly excepted
+         * from it. */
+        needs_sandboxing = (params->flags & EXEC_APPLY_SANDBOXING) && !(command->flags & EXEC_COMMAND_FULLY_PRIVILEGED);
+
         /* Journald will try to look-up our cgroup in order to populate _SYSTEMD_CGROUP and _SYSTEMD_UNIT fields.
          * Hence we need to migrate to the target cgroup from init.scope before connecting to journald */
         if (params->cgroup_path) {
-                _cleanup_free_ char *p = NULL;
+                _cleanup_free_ char *subcgroup = NULL;
 
-                r = exec_params_get_cgroup_path(params, cgroup_context, &p);
+                r = exec_params_get_cgroup_path(params, cgroup_context, params->cgroup_path, &subcgroup);
                 if (r < 0) {
                         *exit_status = EXIT_CGROUP;
                         return log_error_errno(r, "Failed to acquire cgroup path: %m");
                 }
+                if (r > 0) {
+                        /* If there is a subcgroup required, let's make sure to create it now. */
+                        r = cg_create(subcgroup);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to create subcgroup '%s': %m", subcgroup);
+                }
 
-                r = cg_attach(p, 0);
+                /* If we need a cgroup namespace, we cannot yet move the service to its configured subgroup,
+                 * as unsharing the cgroup namespace later on makes the current cgroup the root of the
+                 * namespace and we want the root of the namespace to be the main service cgroup and not the
+                 * subgroup. One edge case is if we're a control process that needs to be spawned in a
+                 * subgroup, in this case, we have no choice as moving into the main service cgroup might
+                 * violate the no inner processes rule of cgroupv2. */
+                const char *cgtarget = needs_sandboxing && exec_needs_cgroup_namespace(context) &&
+                                                           !exec_params_needs_control_subcgroup(params)
+                                                           ? params->cgroup_path : subcgroup;
+
+                r = cg_attach(cgtarget, 0);
                 if (r == -EUCLEAN) {
                         *exit_status = EXIT_CGROUP;
                         return log_error_errno(r,
                                                "Failed to attach process to cgroup '%s', "
                                                "because the cgroup or one of its parents or "
-                                               "siblings is in the threaded mode.", p);
+                                               "siblings is in the threaded mode.", cgtarget);
                 }
                 if (r < 0) {
                         *exit_status = EXIT_CGROUP;
-                        return log_error_errno(r, "Failed to attach to cgroup %s: %m", p);
+                        return log_error_errno(r, "Failed to attach to cgroup %s: %m", cgtarget);
                 }
         }
 
@@ -5099,10 +5199,6 @@ int exec_invoke(
                 }
         }
 
-        /* We need sandboxing if the caller asked us to apply it and the command isn't explicitly excepted
-         * from it. */
-        needs_sandboxing = (params->flags & EXEC_APPLY_SANDBOXING) && !(command->flags & EXEC_COMMAND_FULLY_PRIVILEGED);
-
         if (params->cgroup_path) {
                 /* If delegation is enabled we'll pass ownership of the cgroup to the user of the new process. On cgroup v1
                  * this is only about systemd's own hierarchy, i.e. not the controller hierarchies, simply because that's not
@@ -5118,7 +5214,7 @@ int exec_invoke(
                                 return log_error_errno(r, "Failed to adjust control group access: %m");
                         }
 
-                        r = exec_params_get_cgroup_path(params, cgroup_context, &p);
+                        r = exec_params_get_cgroup_path(params, cgroup_context, params->cgroup_path, &p);
                         if (r < 0) {
                                 *exit_status = EXIT_CGROUP;
                                 return log_error_errno(r, "Failed to acquire cgroup path: %m");
@@ -5235,9 +5331,15 @@ int exec_invoke(
                 *exit_status = EXIT_MEMORY;
                 return log_oom();
         }
-        accum_env = strv_env_clean(accum_env);
+        strv_env_clean(accum_env);
 
         (void) umask(context->umask);
+
+        r = setup_term_environment(context, &accum_env);
+        if (r < 0) {
+                *exit_status = EXIT_MEMORY;
+                return log_error_errno(r, "Failed to construct $TERM: %m");
+        }
 
         r = setup_keyring(context, params, uid, gid);
         if (r < 0) {
@@ -5293,7 +5395,8 @@ int exec_invoke(
                  * wins here. (See above.) */
 
                 /* All fds passed in the fds array will be closed in the pam child process. */
-                r = setup_pam(context, params, username, uid, gid, &accum_env, params->fds, n_fds, params->exec_fd);
+                r = setup_pam(context, cgroup_context, params, username, uid, gid, &accum_env,
+                              params->fds, n_fds, needs_sandboxing, params->exec_fd);
                 if (r < 0) {
                         *exit_status = EXIT_PAM;
                         return log_error_errno(r, "Failed to set up PAM session: %m");
@@ -5317,7 +5420,7 @@ int exec_invoke(
                 }
         }
 
-        if (needs_sandboxing && !have_cap_sys_admin && exec_context_needs_cap_sys_admin(context)) {
+        if (needs_sandboxing && !have_cap_sys_admin && exec_needs_cap_sys_admin(context, params)) {
                 /* If we're unprivileged, set up the user namespace first to enable use of the other namespaces.
                  * Users with CAP_SYS_ADMIN can set up user namespaces last because they will be able to
                  * set up all of the other namespaces (i.e. network, mount, UTS) without a user namespace. */
@@ -5417,6 +5520,17 @@ int exec_invoke(
                         exit_status);
         if (r < 0)
                 return r;
+
+        if (needs_sandboxing && exec_needs_cgroup_namespace(context) && params->cgroup_path) {
+                /* Move ourselves into the subcgroup now *after* we've unshared the cgroup namespace, which
+                 * ensures the root of the cgroup namespace is the top level service cgroup and not the
+                 * subcgroup. Adjust the prefix accordingly since we're in a cgroup namespace now. */
+                r = attach_to_subcgroup(context, cgroup_context, params, /* prefix= */ NULL);
+                if (r < 0) {
+                        *exit_status = EXIT_CGROUP;
+                        return r;
+                }
+        }
 
         /* Now that the mount namespace has been set up and privileges adjusted, let's look for the thing we
          * shall execute. */

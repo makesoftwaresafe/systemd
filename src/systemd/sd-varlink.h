@@ -17,9 +17,6 @@
   along with systemd; If not, see <https://www.gnu.org/licenses/>.
 ***/
 
-#include <stdarg.h>
-#include <sys/types.h>
-
 #include "_sd-common.h"
 #include "sd-event.h"
 #include "sd-json.h"
@@ -242,7 +239,7 @@ int sd_varlink_server_listen_fd(sd_varlink_server *s, int fd);
 int sd_varlink_server_listen_auto(sd_varlink_server *s);
 int sd_varlink_server_listen_name(sd_varlink_server *s, const char *name);
 int sd_varlink_server_add_connection(sd_varlink_server *s, int fd, sd_varlink **ret);
-int sd_varlink_server_add_connection_pair(sd_varlink_server *s, int input_fd, int output_fd, const struct ucred *ucred_override, sd_varlink **ret);
+int sd_varlink_server_add_connection_pair(sd_varlink_server *s, int input_fd, int output_fd, const struct ucred *override_ucred, sd_varlink **ret);
 int sd_varlink_server_add_connection_stdio(sd_varlink_server *s, sd_varlink **ret);
 
 /* Bind callbacks */

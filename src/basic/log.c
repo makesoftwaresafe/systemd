@@ -1,16 +1,9 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <errno.h>
 #include <fcntl.h>
-#include <inttypes.h>
-#include <limits.h>
-#include <stdarg.h>
-#include <stddef.h>
 #include <sys/signalfd.h>
 #include <sys/stat.h>
-#include <sys/time.h>
 #include <sys/uio.h>
-#include <sys/un.h>
 #include <threads.h>
 #include <unistd.h>
 
@@ -28,8 +21,6 @@
 #include "list.h"
 #include "log.h"
 #include "log-context.h"
-#include "macro.h"
-#include "missing_syscall.h"
 #include "parse-util.h"
 #include "proc-cmdline.h"
 #include "process-util.h"
@@ -1516,7 +1507,7 @@ DEFINE_STRING_TABLE_LOOKUP(log_target, LogTarget);
 void log_received_signal(int level, const struct signalfd_siginfo *si) {
         assert(si);
 
-        if (pid_is_valid(si->ssi_pid)) {
+        if (si_code_from_process(si->ssi_code) && pid_is_valid(si->ssi_pid)) {
                 _cleanup_free_ char *p = NULL;
 
                 (void) pid_get_comm(si->ssi_pid, &p);

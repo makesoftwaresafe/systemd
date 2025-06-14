@@ -1,45 +1,38 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <errno.h>
 #include <fcntl.h>
 #include <linux/kd.h>
-#include <sys/epoll.h>
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/reboot.h>
-#include <sys/timerfd.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-#if HAVE_AUDIT
-#include <libaudit.h>
-#endif
-
+#include "sd-bus.h"
 #include "sd-daemon.h"
 #include "sd-messages.h"
 #include "sd-path.h"
 
 #include "all-units.h"
 #include "alloc-util.h"
+#include "architecture.h"
 #include "audit-fd.h"
 #include "boot-timestamps.h"
+#include "bpf-restrict-fs.h"
 #include "build-path.h"
 #include "bus-common-errors.h"
 #include "bus-error.h"
-#include "bus-kernel.h"
-#include "bus-util.h"
 #include "clean-ipc.h"
-#include "clock-util.h"
 #include "common-signal.h"
 #include "confidential-virt.h"
 #include "constants.h"
 #include "creds-util.h"
 #include "daemon-util.h"
-#include "dbus.h"
 #include "dbus-job.h"
 #include "dbus-manager.h"
 #include "dbus-unit.h"
+#include "dbus.h"
 #include "dirent-util.h"
 #include "dynamic-user.h"
 #include "env-util.h"
@@ -49,7 +42,9 @@
 #include "execute.h"
 #include "exit-status.h"
 #include "fd-util.h"
-#include "fileio.h"
+#include "fdset.h"
+#include "format-util.h"
+#include "fs-util.h"
 #include "generator-setup.h"
 #include "hashmap.h"
 #include "initrd-util.h"
@@ -57,24 +52,21 @@
 #include "install.h"
 #include "io-util.h"
 #include "iovec-util.h"
-#include "label-util.h"
-#include "load-fragment.h"
+#include "libaudit-util.h"
 #include "locale-setup.h"
 #include "log.h"
-#include "macro.h"
-#include "manager.h"
 #include "manager-dump.h"
 #include "manager-serialize.h"
-#include "memory-util.h"
+#include "manager.h"
 #include "mkdir-label.h"
 #include "mount-util.h"
 #include "notify-recv.h"
-#include "os-util.h"
 #include "parse-util.h"
 #include "path-lookup.h"
 #include "path-util.h"
 #include "plymouth-util.h"
 #include "pretty-print.h"
+#include "prioq.h"
 #include "process-util.h"
 #include "psi-util.h"
 #include "ratelimit.h"
@@ -82,6 +74,7 @@
 #include "rm-rf.h"
 #include "selinux-util.h"
 #include "serialize.h"
+#include "set.h"
 #include "signal-util.h"
 #include "socket-util.h"
 #include "special.h"
@@ -96,7 +89,6 @@
 #include "terminal-util.h"
 #include "time-util.h"
 #include "transaction.h"
-#include "uid-range.h"
 #include "umask-util.h"
 #include "unit-name.h"
 #include "user-util.h"
@@ -505,7 +497,7 @@ static int manager_enable_special_signals(Manager *m) {
         fd = open_terminal("/dev/tty0", O_RDWR|O_NOCTTY|O_CLOEXEC);
         if (fd < 0)
                 /* Support systems without virtual console (ENOENT) gracefully */
-                log_full_errno(fd == -ENOENT ? LOG_DEBUG : LOG_WARNING, fd, "Failed to open /dev/tty0, ignoring: %m");
+                log_full_errno(fd == -ENOENT ? LOG_DEBUG : LOG_WARNING, fd, "Failed to open %s, ignoring: %m", "/dev/tty0");
         else {
                 /* Enable that we get SIGWINCH on kbrequest */
                 if (ioctl(fd, KDSIGACCEPT, SIGWINCH) < 0)
@@ -867,6 +859,10 @@ static int compare_job_priority(const void *a, const void *b) {
         const Job *x = a, *y = b;
 
         return unit_compare_priority(x->unit, y->unit);
+}
+
+usec_t manager_default_timeout(RuntimeScope scope) {
+        return scope == RUNTIME_SCOPE_SYSTEM ? DEFAULT_TIMEOUT_USEC : DEFAULT_USER_TIMEOUT_USEC;
 }
 
 int manager_new(RuntimeScope runtime_scope, ManagerTestRunFlags test_run_flags, Manager **ret) {
@@ -1367,7 +1363,6 @@ good:
 
 static unsigned manager_dispatch_gc_unit_queue(Manager *m) {
         unsigned n = 0, gc_marker;
-        Unit *u;
 
         assert(m);
 
@@ -1379,11 +1374,13 @@ static unsigned manager_dispatch_gc_unit_queue(Manager *m) {
 
         gc_marker = m->gc_marker;
 
-        while ((u = LIST_POP(gc_queue, m->gc_unit_queue))) {
+        Unit *u;
+        while ((u = m->gc_unit_queue)) {
                 assert(u->in_gc_queue);
 
                 unit_gc_sweep(u, gc_marker);
 
+                LIST_REMOVE(gc_queue, m->gc_unit_queue, u);
                 u->in_gc_queue = false;
 
                 n++;
@@ -1850,6 +1847,7 @@ static bool manager_dbus_is_running(Manager *m, bool deserialized) {
                     SERVICE_MOUNTING,
                     SERVICE_RELOAD,
                     SERVICE_RELOAD_NOTIFY,
+                    SERVICE_REFRESH_EXTENSIONS,
                     SERVICE_RELOAD_SIGNAL))
                 return false;
 
@@ -1895,8 +1893,15 @@ static void manager_preset_all(Manager *m) {
         /* If this is the first boot, and we are in the host system, then preset everything */
         UnitFilePresetMode mode =
                 ENABLE_FIRST_BOOT_FULL_PRESET ? UNIT_FILE_PRESET_FULL : UNIT_FILE_PRESET_ENABLE_ONLY;
+        InstallChange *changes = NULL;
+        size_t n_changes = 0;
 
-        r = unit_file_preset_all(RUNTIME_SCOPE_SYSTEM, 0, NULL, mode, NULL, NULL);
+        CLEANUP_ARRAY(changes, n_changes, install_changes_free);
+
+        log_info("Applying preset policy.");
+        r = unit_file_preset_all(RUNTIME_SCOPE_SYSTEM, /* file_flags = */ 0,
+                                 /* root_dir = */ NULL, mode, &changes, &n_changes);
+        install_changes_dump(r, "preset", changes, n_changes, /* quiet = */ false);
         if (r < 0)
                 log_full_errno(r == -EEXIST ? LOG_NOTICE : LOG_WARNING, r,
                                "Failed to populate /etc with preset unit settings, ignoring: %m");
@@ -2153,6 +2158,17 @@ int manager_add_job_full(
 
         tr = transaction_free(tr);
         return 0;
+}
+
+int manager_add_job(
+        Manager *m,
+        JobType type,
+        Unit *unit,
+        JobMode mode,
+        sd_bus_error *error,
+        Job **ret) {
+
+        return manager_add_job_full(m, type, unit, mode, 0, NULL, error, ret);
 }
 
 int manager_add_job_by_name(Manager *m, JobType type, const char *name, JobMode mode, Set *affected_jobs, sd_bus_error *e, Job **ret) {
@@ -3893,9 +3909,14 @@ static int manager_run_environment_generators(Manager *m) {
         };
 
         WITH_UMASK(0022)
-                r = execute_directories((const char* const*) paths, DEFAULT_TIMEOUT_USEC, gather_environment,
-                                        args, NULL, m->transient_environment,
-                                        EXEC_DIR_PARALLEL | EXEC_DIR_IGNORE_ERRORS | EXEC_DIR_SET_SYSTEMD_EXEC_PID);
+                r = execute_directories(
+                                (const char* const*) paths,
+                                DEFAULT_TIMEOUT_USEC,
+                                gather_environment,
+                                args,
+                                /* argv[]= */ NULL,
+                                m->transient_environment,
+                                EXEC_DIR_PARALLEL | EXEC_DIR_IGNORE_ERRORS | EXEC_DIR_SET_SYSTEMD_EXEC_PID);
         return r;
 }
 

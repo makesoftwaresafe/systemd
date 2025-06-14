@@ -1,27 +1,24 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <arpa/inet.h>
-#include <assert.h>
-#include <errno.h>
-#include <fcntl.h>
+#include <linux/bpf.h>
 #include <linux/bpf_insn.h>
-#include <net/ethernet.h>
+#include <linux/if_ether.h>
 #include <net/if.h>
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
-#include <stddef.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <unistd.h>
 
 #include "alloc-util.h"
 #include "bpf-firewall.h"
 #include "bpf-program.h"
+#include "errno-util.h"
 #include "fd-util.h"
 #include "in-addr-prefix-util.h"
 #include "manager.h"
 #include "memory-util.h"
-#include "missing_syscall.h"
+#include "set.h"
+#include "string-util.h"
 #include "strv.h"
 #include "unit.h"
 #include "virt.h"
@@ -690,13 +687,10 @@ int bpf_firewall_install(Unit *u) {
         cc = unit_get_cgroup_context(u);
         if (!cc)
                 return -EINVAL;
+
         crt = unit_get_cgroup_runtime(u);
-        if (!crt)
-                return -EINVAL;
-        if (!crt->cgroup_path)
-                return -EINVAL;
-        if (!crt->cgroup_realized)
-                return -EINVAL;
+        if (!crt || !crt->cgroup_path)
+                return -EOWNERDEAD;
 
         if (bpf_program_supported() <= 0)
                 return log_unit_debug_errno(u, SYNTHETIC_ERRNO(EOPNOTSUPP),

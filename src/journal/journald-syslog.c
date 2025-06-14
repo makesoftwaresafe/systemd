@@ -1,28 +1,33 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <stddef.h>
-#include <sys/epoll.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
+#include "sd-event.h"
 #include "sd-messages.h"
 
 #include "alloc-util.h"
+#include "errno-util.h"
 #include "fd-util.h"
 #include "format-util.h"
 #include "iovec-util.h"
 #include "journal-internal.h"
 #include "journald-client.h"
 #include "journald-console.h"
+#include "journald-context.h"
 #include "journald-kmsg.h"
 #include "journald-manager.h"
 #include "journald-syslog.h"
 #include "journald-wall.h"
+#include "log.h"
+#include "log-ratelimit.h"
 #include "process-util.h"
 #include "selinux-util.h"
 #include "socket-util.h"
 #include "stdio-util.h"
 #include "string-util.h"
 #include "syslog-util.h"
+#include "time-util.h"
 
 /* Warn once every 30s if we missed syslog message */
 #define WARN_FORWARD_SYSLOG_MISSED_USEC (30 * USEC_PER_SEC)
@@ -504,7 +509,7 @@ int manager_open_syslog_socket(Manager *m, const char *syslog_socket) {
         if (mac_selinux_use()) {
                 r = setsockopt_int(m->syslog_fd, SOL_SOCKET, SO_PASSSEC, true);
                 if (r < 0)
-                        log_warning_errno(r, "SO_PASSSEC failed: %m");
+                        log_full_errno(ERRNO_IS_NEG_NOT_SUPPORTED(r) ? LOG_DEBUG : LOG_WARNING, r, "SO_PASSSEC failed, ignoring: %m");
         }
 
         r = setsockopt_int(m->syslog_fd, SOL_SOCKET, SO_TIMESTAMP, true);

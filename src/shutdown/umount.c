@@ -5,11 +5,11 @@
 
 #include <fcntl.h>
 #include <sys/mount.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #include "alloc-util.h"
 #include "chase.h"
+#include "constants.h"
 #include "dirent-util.h"
 #include "errno-util.h"
 #include "fd-util.h"
@@ -29,7 +29,6 @@
 #include "signal-util.h"
 #include "stat-util.h"
 #include "string-util.h"
-#include "time-util.h"
 #include "umount.h"
 #include "virt.h"
 
@@ -189,7 +188,7 @@ static void log_umount_blockers(const char *mnt) {
 
         _cleanup_closedir_ DIR *dir = opendir("/proc");
         if (!dir)
-                return (void) log_warning_errno(errno, "Failed to open /proc/: %m");
+                return (void) log_warning_errno(errno, "Failed to open %s: %m", "/proc/");
 
         FOREACH_DIRENT_ALL(de, dir, break) {
                 if (!IN_SET(de->d_type, DT_DIR, DT_UNKNOWN))

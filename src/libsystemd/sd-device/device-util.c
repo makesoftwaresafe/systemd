@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include "alloc-util.h"
 #include "device-private.h"
 #include "device-util.h"
 #include "devnum-util.h"
@@ -27,6 +26,11 @@ int devname_from_devnum(mode_t mode, dev_t devnum, char **ret) {
                 return r;
 
         return strdup_to(ret, devname);
+}
+
+int devname_from_stat_rdev(const struct stat *st, char **ret) {
+        assert(st);
+        return devname_from_devnum(st->st_mode, st->st_rdev, ret);
 }
 
 int device_open_from_devnum(mode_t mode, dev_t devnum, int flags, char **ret_devname) {
@@ -101,31 +105,31 @@ char** device_make_log_fields(sd_device *device) {
 
         r = sd_device_get_devnum(device, &devnum);
         if (r < 0 && r != -ENOENT)
-                log_device_debug_errno(device, r, "Failed to get device \"DEVNUM\" property, ignoring: %m");
+                log_device_debug_errno(device, r, "Failed to get device \"%s\" property, ignoring: %m", "DEVNUM");
         if (r >= 0)
                 (void) strv_extendf(&strv, "DEVNUM="DEVNUM_FORMAT_STR, DEVNUM_FORMAT_VAL(devnum));
 
         r = sd_device_get_ifindex(device, &ifindex);
         if (r < 0 && r != -ENOENT)
-                log_device_debug_errno(device, r, "Failed to get device \"IFINDEX\" property, ignoring: %m");
+                log_device_debug_errno(device, r, "Failed to get device \"%s\" property, ignoring: %m", "IFINDEX");
         if (r >= 0)
                 (void) strv_extendf(&strv, "IFINDEX=%i", ifindex);
 
         r = sd_device_get_action(device, &action);
         if (r < 0 && r != -ENOENT)
-                log_device_debug_errno(device, r, "Failed to get device \"ACTION\" property, ignoring: %m");
+                log_device_debug_errno(device, r, "Failed to get device \"%s\" property, ignoring: %m", "ACTION");
         if (r >= 0)
                 (void) strv_extendf(&strv, "ACTION=%s", device_action_to_string(action));
 
         r = sd_device_get_seqnum(device, &seqnum);
         if (r < 0 && r != -ENOENT)
-                log_device_debug_errno(device, r, "Failed to get device \"SEQNUM\" property, ignoring: %m");
+                log_device_debug_errno(device, r, "Failed to get device \"%s\" property, ignoring: %m", "SEQNUM");
         if (r >= 0)
                 (void) strv_extendf(&strv, "SEQNUM=%"PRIu64, seqnum);
 
         r = sd_device_get_diskseq(device, &diskseq);
         if (r < 0 && r != -ENOENT)
-                log_device_debug_errno(device, r, "Failed to get device \"DISKSEQ\" property, ignoring: %m");
+                log_device_debug_errno(device, r, "Failed to get device \"%s\" property, ignoring: %m", "DISKSEQ");
         if (r >= 0)
                 (void) strv_extendf(&strv, "DISKSEQ=%"PRIu64, diskseq);
 

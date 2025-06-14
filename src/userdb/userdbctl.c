@@ -173,6 +173,12 @@ static const struct {
                 .disposition = USER_SYSTEM,
         },
         {
+                .first = GREETER_UID_MIN,
+                .last = GREETER_UID_MAX,
+                .name = "dynamic greeter",
+                .disposition = USER_DYNAMIC,
+        },
+        {
                 .first = DYNAMIC_UID_MIN,
                 .last = DYNAMIC_UID_MAX,
                 .name = "dynamic system",
@@ -1040,7 +1046,7 @@ static int display_services(int argc, char *argv[], void *userdata) {
                         return 0;
                 }
 
-                return log_error_errno(errno, "Failed to open /run/systemd/userdb/: %m");
+                return log_error_errno(errno, "Failed to open %s: %m", "/run/systemd/userdb/");
         }
 
         t = table_new("service", "listening");
@@ -1461,7 +1467,7 @@ static int load_credentials(int argc, char *argv[], void *userdata) {
                 /* xopen_flags= */ XO_LABEL,
                 /* mode= */ 0755);
         if (userdb_dir_fd < 0)
-                return log_error_errno(userdb_dir_fd, "Failed to open '/etc/userdb/': %m");
+                return log_error_errno(userdb_dir_fd, "Failed to open %s: %m", "/etc/userdb/");
 
         FOREACH_ARRAY(i, des->entries, des->n_entries) {
                 struct dirent *de = *i;

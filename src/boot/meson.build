@@ -205,9 +205,15 @@ efi_c_ld_args = [
         '-z', 'separate-code',
 ]
 
-# Check if the compiler is GCC and then we link to lgcc in that case only
-if cc.get_id() == 'gcc'
-    efi_c_ld_args += ['-lgcc']
+linker_sanity_code = 'void a(void) {}; void _start(void) { a(); }'
+linker_sanity_args = ['-nostdlib', '-Wl,--fatal-warnings']
+
+# Check if libgcc is available and then use it. It is needed for gcc builds
+# and for ia32 builds with clang.
+if cc.links(linker_sanity_code,
+            name : 'libgcc is available',
+            args : [linker_sanity_args, '-lgcc'])
+        efi_c_ld_args += ['-lgcc']
 endif
 
 efi_c_ld_args += cc.get_supported_link_arguments(
@@ -261,8 +267,6 @@ efi_arch_c_ld_args = {
         'x86'    : ['-m32'],
 }
 
-linker_sanity_code = 'void a(void) {}; void _start(void) { a(); }'
-linker_sanity_args = ['-nostdlib', '-Wl,--fatal-warnings']
 if not cc.links(linker_sanity_code,
                 name : 'linker supports -static-pie',
                 args : [linker_sanity_args, '-static-pie'])
@@ -294,13 +298,13 @@ libefi_sources = files(
         'devicetree.c',
         'drivers.c',
         'edid.c',
+        'efi-efivars.c',
         'efi-firmware.c',
+        'efi-log.c',
         'efi-string.c',
-        'efivars.c',
         'export-vars.c',
         'graphics.c',
         'initrd.c',
-        'log.c',
         'measure.c',
         'part-discovery.c',
         'pe.c',
@@ -343,6 +347,11 @@ endif
 if host_machine.cpu_family() in ['aarch64', 'arm', 'x86_64', 'x86']
         systemd_boot_sources += files('bcd.c')
 endif
+
+sources += libefi_sources
+sources += systemd_boot_sources
+sources += stub_sources
+sources += addon_sources
 
 boot_targets = []
 efi_elf_binaries = []
