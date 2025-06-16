@@ -1,12 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include <ctype.h>
-#include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
-#include <stddef.h>
 #include <stdio.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
 #include "sd-device.h"
@@ -17,10 +16,8 @@
 #include "device-enumerator-private.h"
 #include "device-private.h"
 #include "device-util.h"
-#include "devnum-util.h"
 #include "dirent-util.h"
 #include "errno-util.h"
-#include "extract-word.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "glyph-util.h"
@@ -31,7 +28,7 @@
 #include "string-table.h"
 #include "string-util.h"
 #include "strv.h"
-#include "terminal-util.h"
+#include "time-util.h"
 #include "udev-util.h"
 #include "udevadm.h"
 #include "udevadm-util.h"
@@ -1108,7 +1105,7 @@ static int parse_argv(int argc, char *argv[]) {
                                 if (streq(optarg, "env")) /* deprecated */
                                         arg_query = QUERY_PROPERTY;
                                 else
-                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "unknown query type");
+                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Unknown query type '%s'", optarg);
                         }
                         break;
 
@@ -1188,7 +1185,7 @@ static int parse_argv(int argc, char *argv[]) {
                 case ARG_ATTR_MATCH:
                         if (!strchr(optarg, '='))
                                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
-                                                "expect <ATTR>=<value> instead of '%s'", optarg);
+                                                "Expected <ATTR>=<value> instead of '%s'", optarg);
 
                         r = strv_extend(&arg_attr_match, optarg);
                         if (r < 0)
@@ -1198,7 +1195,7 @@ static int parse_argv(int argc, char *argv[]) {
                 case ARG_ATTR_NOMATCH:
                         if (!strchr(optarg, '='))
                                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
-                                                "expect <ATTR>=<value> instead of '%s'", optarg);
+                                                "Expected <ATTR>=<value> instead of '%s'", optarg);
 
                         r = strv_extend(&arg_attr_nomatch, optarg);
                         if (r < 0)
@@ -1208,7 +1205,7 @@ static int parse_argv(int argc, char *argv[]) {
                 case ARG_PROPERTY_MATCH:
                         if (!strchr(optarg, '='))
                                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
-                                                "expect <PROPERTY>=<value> instead of '%s'", optarg);
+                                                "Expected <PROPERTY>=<value> instead of '%s'", optarg);
 
                         r = strv_extend(&arg_property_match, optarg);
                         if (r < 0)
@@ -1279,7 +1276,7 @@ static int parse_argv(int argc, char *argv[]) {
 }
 
 int info_main(int argc, char *argv[], void *userdata) {
-        int r, ret;
+        int r;
 
         r = parse_argv(argc, argv);
         if (r <= 0)
@@ -1301,19 +1298,18 @@ int info_main(int argc, char *argv[], void *userdata) {
                 return print_tree(NULL);
         }
 
-        ret = 0;
+        int ret = 0;
         STRV_FOREACH(p, arg_devices) {
                 _cleanup_(sd_device_unrefp) sd_device *device = NULL;
 
-                r = find_device(*p, NULL, &device);
+                r = find_device(*p, /* prefix = */ NULL, &device);
                 if (r < 0) {
                         if (r == -EINVAL)
-                                log_error_errno(r, "Bad argument \"%s\", expected an absolute path in /dev/ or /sys/ or a unit name: %m", *p);
+                                log_error_errno(r, "Bad argument \"%s\", expected an absolute path in /dev/ or /sys/, device ID, or a unit name: %m", *p);
                         else
                                 log_error_errno(r, "Unknown device \"%s\": %m",  *p);
 
-                        if (ret == 0)
-                                ret = r;
+                        RET_GATHER(ret, r);
                         continue;
                 }
 

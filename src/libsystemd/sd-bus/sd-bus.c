@@ -1,22 +1,21 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <endian.h>
 #include <netdb.h>
+#include <poll.h>
 #include <pthread.h>
-#include <signal.h>
 #include <stdlib.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <threads.h>
 #include <unistd.h>
 
 #include "sd-bus.h"
+#include "sd-event.h"
 
 #include "af-list.h"
 #include "alloc-util.h"
 #include "bus-container.h"
 #include "bus-control.h"
+#include "bus-error.h"
 #include "bus-internal.h"
 #include "bus-kernel.h"
 #include "bus-label.h"
@@ -28,7 +27,6 @@
 #include "bus-track.h"
 #include "bus-type.h"
 #include "cgroup-util.h"
-#include "constants.h"
 #include "errno-util.h"
 #include "fd-util.h"
 #include "format-util.h"
@@ -38,16 +36,16 @@
 #include "io-util.h"
 #include "log.h"
 #include "log-context.h"
-#include "macro.h"
 #include "memory-util.h"
-#include "missing_syscall.h"
 #include "origin-id.h"
 #include "parse-util.h"
 #include "path-util.h"
+#include "prioq.h"
 #include "process-util.h"
-#include "stdio-util.h"
+#include "set.h"
 #include "string-util.h"
 #include "strv.h"
+#include "time-util.h"
 #include "user-util.h"
 
 #define log_debug_bus_message(m)                                         \
@@ -524,7 +522,7 @@ static int synthesize_connected_signal(sd_bus *bus) {
         return 0;
 }
 
-void bus_set_state(sd_bus *bus, enum bus_state state) {
+void bus_set_state(sd_bus *bus, BusState state) {
         static const char* const table[_BUS_STATE_MAX] = {
                 [BUS_UNSET]          = "UNSET",
                 [BUS_WATCH_BIND]     = "WATCH_BIND",
@@ -618,7 +616,7 @@ static int bus_send_hello(sd_bus *bus) {
 }
 
 int bus_start_running(sd_bus *bus) {
-        struct reply_callback *c;
+        BusReplyCallback *c;
         usec_t n;
         int r;
 
@@ -1563,14 +1561,18 @@ _public_ int sd_bus_open_system_remote(sd_bus **ret, const char *host) {
 
 int bus_set_address_machine(sd_bus *b, RuntimeScope runtime_scope, const char *machine) {
         _cleanup_free_ char *a = NULL;
-        const char *rhs;
 
         assert(b);
         assert(machine);
 
-        rhs = strchr(machine, '@');
-        if (rhs || runtime_scope == RUNTIME_SCOPE_USER) {
-                _cleanup_free_ char *u = NULL, *eu = NULL, *erhs = NULL;
+        _cleanup_free_ char *u = NULL, *h = NULL;
+        int with_at;
+        with_at = split_user_at_host(machine, &u, &h);
+        if (with_at < 0)
+                return with_at;
+
+        if (with_at || runtime_scope == RUNTIME_SCOPE_USER) {
+                _cleanup_free_ char *eu = NULL, *eh = NULL;
 
                 /* If there's an "@" in the container specification, we'll connect as a user specified at its
                  * left hand side, which is useful in combination with user=true. This isn't as trivial as it
@@ -1580,43 +1582,38 @@ int bus_set_address_machine(sd_bus *b, RuntimeScope runtime_scope, const char *m
                  * into the container and acquire a PAM session there, and then invoke systemd-stdio-bridge
                  * in it, which propagates the bus transport to us. */
 
-                if (rhs) {
-                        if (rhs > machine)
-                                u = strndup(machine, rhs - machine);
-                        else
+                if (with_at) {
+                        if (!u) {
                                 u = getusername_malloc(); /* Empty user name, let's use the local one */
-                        if (!u)
-                                return -ENOMEM;
+                                if (!u)
+                                        return -ENOMEM;
+                        }
 
                         eu = bus_address_escape(u);
                         if (!eu)
                                 return -ENOMEM;
-
-                        rhs++;
-                } else {
-                        /* No "@" specified but we shall connect to the user instance? Then assume root (and
-                         * not a user named identically to the calling one). This means:
-                         *
-                         *     --machine=foobar --user    → connect to user bus of root user in container "foobar"
-                         *     --machine=@foobar --user   → connect to user bus of user named like the calling user in container "foobar"
-                         *
-                         * Why? so that behaviour for "--machine=foobar --system" is roughly similar to
-                         * "--machine=foobar --user": both times we unconditionally connect as root user
-                         * regardless what the calling user is. */
-
-                        rhs = machine;
                 }
 
-                if (!isempty(rhs)) {
-                        erhs = bus_address_escape(rhs);
-                        if (!erhs)
+                /* No "@" specified but we shall connect to the user instance? Then assume root (and
+                 * not a user named identically to the calling one). This means:
+                 *
+                 *     --machine=foobar --user    → connect to user bus of root user in container "foobar"
+                 *     --machine=@foobar --user   → connect to user bus of user named like the calling user in container "foobar"
+                 *
+                 * Why? so that behaviour for "--machine=foobar --system" is roughly similar to
+                 * "--machine=foobar --user": both times we unconditionally connect as root user
+                 * regardless what the calling user is. */
+
+                if (h) {
+                        eh = bus_address_escape(h);
+                        if (!eh)
                                 return -ENOMEM;
                 }
 
                 /* systemd-run -M… -PGq --wait -pUser=… -pPAMName=login systemd-stdio-bridge */
 
                 a = strjoin("unixexec:path=systemd-run,"
-                            "argv1=-M", erhs ?: ".host", ","
+                            "argv1=-M", eh ?: ".host", ","
                             "argv2=-PGq,"
                             "argv3=--wait,"
                             "argv4=-pUser%3d", eu ?: "root", ",",
@@ -1639,7 +1636,7 @@ int bus_set_address_machine(sd_bus *b, RuntimeScope runtime_scope, const char *m
                 /* Just a container name, we can go the simple way, and just join the container, and connect
                  * to the well-known path of the system bus there. */
 
-                e = bus_address_escape(machine);
+                e = bus_address_escape(h ?: ".host");
                 if (!e)
                         return -ENOMEM;
 
@@ -1695,7 +1692,7 @@ static int user_and_machine_equivalent(const char *user_and_machine) {
 
         /* Omitting the user name means that we shall use the same user name as we run as locally, which
          * means we'll end up on the same host, let's shortcut */
-        if (streq(user_and_machine, "@.host"))
+        if (STR_IN_SET(user_and_machine, "@.host", "@"))
                 return true;
 
         /* Otherwise, if we are root, then we can also allow the ".host" syntax, as that's the user this
@@ -2167,7 +2164,7 @@ static int dispatch_rqueue(sd_bus *bus, sd_bus_message **m) {
         }
 }
 
-_public_ int sd_bus_send(sd_bus *bus, sd_bus_message *_m, uint64_t *cookie) {
+_public_ int sd_bus_send(sd_bus *bus, sd_bus_message *_m, uint64_t *ret_cookie) {
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = sd_bus_message_ref(_m);
         int r;
 
@@ -2192,7 +2189,7 @@ _public_ int sd_bus_send(sd_bus *bus, sd_bus_message *_m, uint64_t *cookie) {
 
         /* If the cookie number isn't kept, then we know that no reply
          * is expected */
-        if (!cookie && !m->sealed)
+        if (!ret_cookie && !m->sealed)
                 m->header->flags |= BUS_MESSAGE_NO_REPLY_EXPECTED;
 
         r = bus_seal_message(bus, m, 0);
@@ -2244,8 +2241,8 @@ _public_ int sd_bus_send(sd_bus *bus, sd_bus_message *_m, uint64_t *cookie) {
         }
 
 finish:
-        if (cookie)
-                *cookie = BUS_MESSAGE_COOKIE(m);
+        if (ret_cookie)
+                *ret_cookie = BUS_MESSAGE_COOKIE(m);
 
         return 1;
 }
@@ -2296,7 +2293,7 @@ static usec_t calc_elapse(sd_bus *bus, uint64_t usec) {
 }
 
 static int timeout_compare(const void *a, const void *b) {
-        const struct reply_callback *x = a, *y = b;
+        const BusReplyCallback *x = a, *y = b;
 
         if (x->timeout_usec != 0 && y->timeout_usec == 0)
                 return -1;
@@ -2349,7 +2346,7 @@ _public_ int sd_bus_call_async(
                 return r;
 
         if (slot || callback) {
-                s = bus_slot_allocate(bus, !slot, BUS_REPLY_CALLBACK, sizeof(struct reply_callback), userdata);
+                s = bus_slot_allocate(bus, !slot, BUS_REPLY_CALLBACK, sizeof(BusReplyCallback), userdata);
                 if (!s)
                         return -ENOMEM;
 
@@ -2624,7 +2621,7 @@ _public_ int sd_bus_get_events(sd_bus *bus) {
 }
 
 _public_ int sd_bus_get_timeout(sd_bus *bus, uint64_t *timeout_usec) {
-        struct reply_callback *c;
+        BusReplyCallback *c;
 
         assert_return(bus, -EINVAL);
         assert_return(bus = bus_resolve(bus), -ENOPKG);
@@ -2683,7 +2680,7 @@ _public_ int sd_bus_get_timeout(sd_bus *bus, uint64_t *timeout_usec) {
 static int process_timeout(sd_bus *bus) {
         _cleanup_(sd_bus_error_free) sd_bus_error error_buffer = SD_BUS_ERROR_NULL;
         _cleanup_(sd_bus_message_unrefp) sd_bus_message* m = NULL;
-        struct reply_callback *c;
+        BusReplyCallback *c;
         sd_bus_slot *slot;
         bool is_hello;
         usec_t n;
@@ -2773,7 +2770,7 @@ static int process_hello(sd_bus *bus, sd_bus_message *m) {
 static int process_reply(sd_bus *bus, sd_bus_message *m) {
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *synthetic_reply = NULL;
         _cleanup_(sd_bus_error_free) sd_bus_error error_buffer = SD_BUS_ERROR_NULL;
-        struct reply_callback *c;
+        BusReplyCallback *c;
         sd_bus_slot *slot;
         bool is_hello;
         int r;
@@ -3142,7 +3139,7 @@ static int bus_exit_now(sd_bus *bus, sd_event *event) {
         assert_not_reached();
 }
 
-static int process_closing_reply_callback(sd_bus *bus, struct reply_callback *c) {
+static int process_closing_reply_callback(sd_bus *bus, BusReplyCallback *c) {
         _cleanup_(sd_bus_error_free) sd_bus_error error_buffer = SD_BUS_ERROR_NULL;
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL;
         sd_bus_slot *slot;
@@ -3198,7 +3195,7 @@ static int process_closing_reply_callback(sd_bus *bus, struct reply_callback *c)
 static int process_closing(sd_bus *bus, sd_bus_message **ret) {
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL;
         _cleanup_(sd_event_unrefp) sd_event *event = NULL;
-        struct reply_callback *c;
+        BusReplyCallback *c;
         int r;
 
         assert(bus);
@@ -3482,7 +3479,7 @@ _public_ int sd_bus_add_filter(
         assert_return(callback, -EINVAL);
         assert_return(!bus_origin_changed(bus), -ECHILD);
 
-        s = bus_slot_allocate(bus, !slot, BUS_FILTER_CALLBACK, sizeof(struct filter_callback), userdata);
+        s = bus_slot_allocate(bus, !slot, BUS_FILTER_CALLBACK, sizeof(BusFilterCallback), userdata);
         if (!s)
                 return -ENOMEM;
 
@@ -3570,7 +3567,7 @@ int bus_add_match_full(
                 void *userdata,
                 uint64_t timeout_usec) {
 
-        struct bus_match_component *components = NULL;
+        BusMatchComponent *components = NULL;
         size_t n_components = 0;
         _cleanup_(sd_bus_slot_unrefp) sd_bus_slot *s = NULL;
         int r;
@@ -3586,7 +3583,7 @@ int bus_add_match_full(
         if (r < 0)
                 return r;
 
-        s = bus_slot_allocate(bus, !slot, BUS_MATCH_CALLBACK, sizeof(struct match_callback), userdata);
+        s = bus_slot_allocate(bus, !slot, BUS_MATCH_CALLBACK, sizeof(BusMatchCallback), userdata);
         if (!s)
                 return -ENOMEM;
 
@@ -3594,7 +3591,7 @@ int bus_add_match_full(
         s->match_callback.install_callback = install_callback;
 
         if (bus->bus_client) {
-                enum bus_match_scope scope;
+                BusMatchScope scope;
 
                 scope = bus_match_get_scope(components, n_components);
 

@@ -17,10 +17,7 @@
   along with systemd; If not, see <https://www.gnu.org/licenses/>.
 ***/
 
-#include <inttypes.h>
-#include <stdarg.h>
 #include <stdio.h>
-#include <sys/types.h>
 #include <sys/uio.h>
 
 #include "_sd-common.h"
@@ -111,7 +108,7 @@ int sd_bus_get_scope(sd_bus *bus, const char **scope);
 int sd_bus_get_tid(sd_bus *bus, pid_t *tid);
 int sd_bus_get_owner_creds(sd_bus *bus, uint64_t creds_mask, sd_bus_creds **ret);
 
-int sd_bus_send(sd_bus *bus, sd_bus_message *m, uint64_t *cookie);
+int sd_bus_send(sd_bus *bus, sd_bus_message *m, uint64_t *ret_cookie);
 int sd_bus_send_to(sd_bus *bus, sd_bus_message *m, const char *destination, uint64_t *cookie);
 int sd_bus_call(sd_bus *bus, sd_bus_message *m, uint64_t usec, sd_bus_error *ret_error, sd_bus_message **reply);
 int sd_bus_call_async(sd_bus *bus, sd_bus_slot **slot, sd_bus_message *m, sd_bus_message_handler_t callback, void *userdata, uint64_t usec);
@@ -251,7 +248,7 @@ int sd_bus_message_read_strv_extend(sd_bus_message *m, char ***l);
 int sd_bus_message_skip(sd_bus_message *m, const char *types);
 int sd_bus_message_enter_container(sd_bus_message *m, char type, const char *contents);
 int sd_bus_message_exit_container(sd_bus_message *m);
-int sd_bus_message_peek_type(sd_bus_message *m, char *type, const char **contents);
+int sd_bus_message_peek_type(sd_bus_message *m, char *ret_type, const char **ret_contents);
 int sd_bus_message_verify_type(sd_bus_message *m, char type, const char *contents);
 int sd_bus_message_at_end(sd_bus_message *m, int complete);
 int sd_bus_message_rewind(sd_bus_message *m, int complete);
@@ -313,7 +310,7 @@ int sd_bus_query_sender_creds(sd_bus_message *m, uint64_t mask, sd_bus_creds **c
 int sd_bus_query_sender_privilege(sd_bus_message *m, int capability);
 
 int sd_bus_match_signal(sd_bus *bus, sd_bus_slot **ret, const char *sender, const char *path, const char *interface, const char *member, sd_bus_message_handler_t callback, void *userdata);
-int sd_bus_match_signal_async(sd_bus *bus, sd_bus_slot **ret, const char *sender, const char *path, const char *interface, const char *member, sd_bus_message_handler_t match_callback, sd_bus_message_handler_t add_callback, void *userdata);
+int sd_bus_match_signal_async(sd_bus *bus, sd_bus_slot **ret, const char *sender, const char *path, const char *interface, const char *member, sd_bus_message_handler_t match_callback, sd_bus_message_handler_t install_callback, void *userdata);
 
 /* Credential handling */
 
@@ -377,8 +374,8 @@ int sd_bus_error_set_errnofv(sd_bus_error *e, int error, const char *format, va_
 int sd_bus_error_get_errno(const sd_bus_error *e);
 int sd_bus_error_copy(sd_bus_error *dest, const sd_bus_error *e);
 int sd_bus_error_move(sd_bus_error *dest, sd_bus_error *e);
-int sd_bus_error_is_set(const sd_bus_error *e);
-int sd_bus_error_has_name(const sd_bus_error *e, const char *name);
+_sd_pure_ int sd_bus_error_is_set(const sd_bus_error *e);
+_sd_pure_ int sd_bus_error_has_name(const sd_bus_error *e, const char *name);
 int sd_bus_error_has_names_sentinel(const sd_bus_error *e, ...) _sd_sentinel_;
 #define sd_bus_error_has_names(e, ...) sd_bus_error_has_names_sentinel(e, __VA_ARGS__, NULL)
 

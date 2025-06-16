@@ -1,17 +1,9 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-#include <stdbool.h>
-
-#include "sd-json.h"
-
 #include "bitfield.h"
-#include "io-util.h"
-#include "macro.h"
+#include "forward.h"
 #include "openssl-util.h"
-#include "ordered-set.h"
-#include "sha256.h"
-#include "tpm2-pcr.h"
 
 typedef enum TPM2Flags {
         TPM2_FLAGS_USE_PIN     = 1 << 0,
@@ -49,9 +41,9 @@ static inline bool TPM2_PCR_MASK_VALID(uint32_t pcr_mask) {
 
 #if HAVE_TPM2
 
-#include <tss2/tss2_esys.h>
-#include <tss2/tss2_mu.h>
-#include <tss2/tss2_rc.h>
+#include <tss2/tss2_esys.h>     /* IWYU pragma: export */
+#include <tss2/tss2_mu.h>       /* IWYU pragma: export */
+#include <tss2/tss2_rc.h>       /* IWYU pragma: export */
 
 int dlopen_tpm2(void);
 
@@ -279,7 +271,7 @@ int tpm2_calculate_policy_or(const TPM2B_DIGEST *branches, size_t n_branches, TP
 int tpm2_calculate_policy_super_pcr(Tpm2PCRPrediction *prediction, uint16_t algorithm, TPM2B_DIGEST *pcr_policy);
 int tpm2_calculate_policy_signed(TPM2B_DIGEST *digest, const TPM2B_NAME *name);
 int tpm2_calculate_serialize(TPM2_HANDLE handle, const TPM2B_NAME *name, const TPM2B_PUBLIC *public, void **ret_serialized, size_t *ret_serialized_size);
-int tpm2_calculate_sealing_policy(const Tpm2PCRValue *pcr_values, size_t n_pcr_values, const TPM2B_PUBLIC *public, bool use_pin, const Tpm2PCRLockPolicy *policy, TPM2B_DIGEST *digest);
+int tpm2_calculate_sealing_policy(const Tpm2PCRValue *pcr_values, size_t n_pcr_values, const TPM2B_PUBLIC *public, bool use_pin, const Tpm2PCRLockPolicy *pcrlock_policy, TPM2B_DIGEST *digest);
 int tpm2_calculate_seal(TPM2_HANDLE parent_handle, const TPM2B_PUBLIC *parent_public, const TPMA_OBJECT *attributes, const struct iovec *secret, const TPM2B_DIGEST *policy, const char *pin, struct iovec *ret_secret, struct iovec *ret_blob, struct iovec *ret_serialized_parent);
 
 int tpm2_get_srk_template(TPMI_ALG_PUBLIC alg, TPMT_PUBLIC *ret_template);
@@ -290,6 +282,9 @@ int tpm2_get_or_create_srk(Tpm2Context *c, const Tpm2Handle *session, TPM2B_PUBL
 
 int tpm2_seal(Tpm2Context *c, uint32_t seal_key_handle, const TPM2B_DIGEST policy_hash[], size_t n_policy, const char *pin, struct iovec *ret_secret, struct iovec **ret_blobs, size_t *ret_n_blobs, uint16_t *ret_primary_alg, struct iovec *ret_srk);
 int tpm2_unseal(Tpm2Context *c, uint32_t hash_pcr_mask, uint16_t pcr_bank, const struct iovec *pubkey, uint32_t pubkey_pcr_mask, sd_json_variant *signature, const char *pin, const Tpm2PCRLockPolicy *pcrlock_policy, uint16_t primary_alg, const struct iovec blobs[], size_t n_blobs, const struct iovec known_policy_hash[], size_t n_known_policy_hash, const struct iovec *srk, struct iovec *ret_secret);
+
+/* tpm2_unseal() returns a bunch of different errors for various flavours of PCR issues, let's group them */
+#define ERRNO_IS_NEG_TPM2_UNSEAL_BAD_PCR(r) IN_SET(r, -EREMCHG, -ENOANO, -EUCLEAN, -EPERM)
 
 #if HAVE_OPENSSL
 int tpm2_tpm2b_public_to_openssl_pkey(const TPM2B_PUBLIC *public, EVP_PKEY **ret);
@@ -458,11 +453,18 @@ typedef enum Tpm2Support {
         TPM2_SUPPORT_LIBRARIES    = 1 << 4,  /* we can dlopen the tpm2 libraries */
         TPM2_SUPPORT_API          = TPM2_SUPPORT_FIRMWARE|TPM2_SUPPORT_DRIVER|TPM2_SUPPORT_SYSTEM|TPM2_SUPPORT_SUBSYSTEM|TPM2_SUPPORT_LIBRARIES,
 
-        /* Flags below are not returned by systemd-analyze has-tpm2 as exit status. */
-        TPM2_SUPPORT_LIBTSS2_ESYS = 1 << 5,  /* we can dlopen libtss2-esys.so.0 */
-        TPM2_SUPPORT_LIBTSS2_RC   = 1 << 6,  /* we can dlopen libtss2-rc.so.0 */
-        TPM2_SUPPORT_LIBTSS2_MU   = 1 << 7,  /* we can dlopen libtss2-mu.so.0 */
+        /* Flags below are used by pcrlock, to indicate hardware specific features. It's not used by systemd-analyze has-tpm2. */
+        TPM2_SUPPORT_AUTHORIZE_NV = 1 << 5,  /* chip supports PolicyAuthorizeNV */
+        TPM2_SUPPORT_SHA256       = 1 << 6,  /* chip supports SHA-256 */
+        TPM2_SUPPORT_API_PCRLOCK  = TPM2_SUPPORT_API | TPM2_SUPPORT_AUTHORIZE_NV | TPM2_SUPPORT_SHA256,
+
+        /* Flags below are not returned by systemd-analyze has-tpm2 nor by systemd-pcrlock as exit status. */
+        TPM2_SUPPORT_LIBTSS2_ESYS = 1 << 7,  /* we can dlopen libtss2-esys.so.0 */
+        TPM2_SUPPORT_LIBTSS2_RC   = 1 << 8,  /* we can dlopen libtss2-rc.so.0 */
+        TPM2_SUPPORT_LIBTSS2_MU   = 1 << 9,  /* we can dlopen libtss2-mu.so.0 */
         TPM2_SUPPORT_LIBTSS2_ALL  = TPM2_SUPPORT_LIBTSS2_ESYS|TPM2_SUPPORT_LIBTSS2_RC|TPM2_SUPPORT_LIBTSS2_MU,
+
+        /* Combined flags for generic (i.e. not tool-specific) support */
         TPM2_SUPPORT_FULL         = TPM2_SUPPORT_API|TPM2_SUPPORT_LIBTSS2_ALL,
 } Tpm2Support;
 

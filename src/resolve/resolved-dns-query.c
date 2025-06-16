@@ -1,12 +1,14 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
+#include "sd-bus.h"
+#include "sd-varlink.h"
+
 #include "alloc-util.h"
 #include "dns-domain.h"
 #include "dns-type.h"
 #include "event-util.h"
 #include "glyph-util.h"
-#include "hostname-util.h"
-#include "local-addresses.h"
+#include "log.h"
 #include "resolved-dns-answer.h"
 #include "resolved-dns-packet.h"
 #include "resolved-dns-query.h"
@@ -14,12 +16,12 @@
 #include "resolved-dns-rr.h"
 #include "resolved-dns-scope.h"
 #include "resolved-dns-search-domain.h"
-#include "resolved-dns-stub.h"
 #include "resolved-dns-synthesize.h"
 #include "resolved-dns-transaction.h"
 #include "resolved-etc-hosts.h"
 #include "resolved-manager.h"
 #include "resolved-timeouts.h"
+#include "set.h"
 #include "string-util.h"
 
 #define QUERIES_MAX 2048
@@ -208,6 +210,8 @@ static int dns_query_candidate_go(DnsQueryCandidate *c) {
         /* Let's keep a reference to the query while we're operating */
         keep_c = dns_query_candidate_ref(c);
 
+        uint64_t generation = c->generation;
+
         /* Start the transactions that are not started yet */
         SET_FOREACH(t, c->transactions) {
                 if (t->state != DNS_TRANSACTION_NULL)
@@ -216,6 +220,13 @@ static int dns_query_candidate_go(DnsQueryCandidate *c) {
                 r = dns_transaction_go(t);
                 if (r < 0)
                         return r;
+
+                if (c->generation != generation)
+                        /* The transaction has been completed, and dns_transaction_complete() ->
+                         * dns_query_candidate_notify() has been already called. Moreover, the query
+                         * candidate has been regenerated, and the query should be already restarted.
+                         * Let's exit from the loop now. */
+                        return 0;
 
                 n++;
         }
@@ -277,6 +288,8 @@ static int dns_query_candidate_setup_transactions(DnsQueryCandidate *c) {
         assert(c->query); /* We shan't add transactions to a candidate that has been detached already */
 
         dns_query_candidate_stop(c);
+
+        c->generation++;
 
         if (c->query->question_bypass) {
                 /* If this is a bypass query, then pass the original query packet along to the transaction */
@@ -367,7 +380,7 @@ void dns_query_candidate_notify(DnsQueryCandidate *c) {
                                         c->query->manager->event,
                                         &c->timeout_event_source,
                                         CLOCK_BOOTTIME,
-                                        CANDIDATE_EXPEDITED_TIMEOUT_USEC, /* accuracy_usec= */ 0,
+                                        CANDIDATE_EXPEDITED_TIMEOUT_USEC, /* accuracy= */ 0,
                                         on_candidate_timeout, c,
                                         /* priority= */ 0, "candidate-timeout",
                                         /* force_reset= */ false);

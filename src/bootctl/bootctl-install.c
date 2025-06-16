@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
+#include <stdlib.h>
+#include <unistd.h>
+
 #include "alloc-util.h"
+#include "boot-entry.h"
 #include "bootctl.h"
 #include "bootctl-install.h"
 #include "bootctl-random-seed.h"
@@ -10,7 +14,9 @@
 #include "dirent-util.h"
 #include "efi-api.h"
 #include "efi-fundamental.h"
+#include "efivars.h"
 #include "env-file.h"
+#include "env-util.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
@@ -18,12 +24,16 @@
 #include "id128-util.h"
 #include "io-util.h"
 #include "kernel-config.h"
-#include "os-util.h"
+#include "log.h"
+#include "openssl-util.h"
 #include "parse-argument.h"
 #include "path-util.h"
 #include "rm-rf.h"
 #include "stat-util.h"
+#include "string-util.h"
+#include "strv.h"
 #include "sync-util.h"
+#include "time-util.h"
 #include "tmpfile-util.h"
 #include "umask-util.h"
 #include "utf8.h"
@@ -208,7 +218,7 @@ static int version_check(int fd_from, const char *from, int fd_to, const char *t
                                         "Skipping \"%s\", it's owned by another boot loader.", to);
 
         r = compare_version(a, b);
-        log_debug("Comparing versions: \"%s\" %s \"%s", a, comparison_operator(r), b);
+        log_debug("Comparing versions: \"%s\" %s \"%s\"", a, comparison_operator(r), b);
         if (r < 0)
                 return log_warning_errno(SYNTHETIC_ERRNO(ESTALE),
                                          "Skipping \"%s\", newer boot loader version in place already.", to);
@@ -870,7 +880,7 @@ static int install_variables(
         if (r == -ENOENT)
                 return 0;
         if (r < 0)
-                return log_error_errno(r, "Cannot access \"%s/%s\": %m", esp_path, path);
+                return log_error_errno(r, "Cannot access \"%s/%s\": %m", esp_path, skip_leading_slash(path));
 
         r = find_slot(uuid, path, &slot);
         if (r < 0) {

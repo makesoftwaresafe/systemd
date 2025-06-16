@@ -1,35 +1,37 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <arpa/inet.h>
-#include <errno.h>
 #include <fcntl.h>
 #include <linux/sctp.h>
 #include <mqueue.h>
 #include <netinet/tcp.h>
-#include <sys/epoll.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "sd-bus.h"
+
 #include "alloc-util.h"
-#include "bpf-firewall.h"
+#include "bpf-program.h"
 #include "bus-error.h"
-#include "bus-util.h"
-#include "chase.h"
-#include "constants.h"
 #include "copy.h"
 #include "dbus-socket.h"
 #include "dbus-unit.h"
 #include "errno-list.h"
+#include "errno-util.h"
 #include "exit-status.h"
+#include "extract-word.h"
 #include "fd-util.h"
+#include "fdset.h"
 #include "format-util.h"
+#include "fs-util.h"
+#include "glyph-util.h"
 #include "in-addr-util.h"
 #include "io-util.h"
 #include "ip-protocol-list.h"
-#include "label-util.h"
 #include "log.h"
 #include "manager.h"
 #include "mkdir-label.h"
+#include "namespace-util.h"
 #include "parse-util.h"
 #include "path-util.h"
 #include "pidfd-util.h"
@@ -38,7 +40,8 @@
 #include "selinux-util.h"
 #include "serialize.h"
 #include "service.h"
-#include "signal-util.h"
+#include "set.h"
+#include "siphash24.h"
 #include "smack-util.h"
 #include "socket.h"
 #include "socket-netlink.h"
@@ -50,14 +53,14 @@
 #include "unit-name.h"
 #include "user-util.h"
 
-struct SocketPeer {
+typedef struct SocketPeer {
         unsigned n_ref;
 
         Socket *socket;
         union sockaddr_union peer;
         socklen_t peer_salen;
         struct ucred peer_cred;
-};
+} SocketPeer;
 
 static const UnitActiveState state_translation_table[_SOCKET_STATE_MAX] = {
         [SOCKET_DEAD]             = UNIT_INACTIVE,
@@ -1018,67 +1021,67 @@ static void socket_apply_socket_options(Socket *s, SocketPort *p, int fd) {
         if (s->keep_alive) {
                 r = setsockopt_int(fd, SOL_SOCKET, SO_KEEPALIVE, true);
                 if (r < 0)
-                        log_unit_warning_errno(UNIT(s), r, "SO_KEEPALIVE failed: %m");
+                        log_unit_warning_errno(UNIT(s), r, "SO_KEEPALIVE failed, ignoring: %m");
         }
 
         if (timestamp_is_set(s->keep_alive_time)) {
                 r = setsockopt_int(fd, SOL_TCP, TCP_KEEPIDLE, s->keep_alive_time / USEC_PER_SEC);
                 if (r < 0)
-                        log_unit_warning_errno(UNIT(s), r, "TCP_KEEPIDLE failed: %m");
+                        log_unit_warning_errno(UNIT(s), r, "TCP_KEEPIDLE failed, ignoring: %m");
         }
 
         if (s->keep_alive_interval > 0) {
                 r = setsockopt_int(fd, SOL_TCP, TCP_KEEPINTVL, s->keep_alive_interval / USEC_PER_SEC);
                 if (r < 0)
-                        log_unit_warning_errno(UNIT(s), r, "TCP_KEEPINTVL failed: %m");
+                        log_unit_warning_errno(UNIT(s), r, "TCP_KEEPINTVL failed, ignoring: %m");
         }
 
         if (s->keep_alive_cnt > 0) {
                 r = setsockopt_int(fd, SOL_TCP, TCP_KEEPCNT, s->keep_alive_cnt);
                 if (r < 0)
-                        log_unit_warning_errno(UNIT(s), r, "TCP_KEEPCNT failed: %m");
+                        log_unit_warning_errno(UNIT(s), r, "TCP_KEEPCNT failed, ignoring: %m");
         }
 
         if (s->defer_accept > 0) {
                 r = setsockopt_int(fd, SOL_TCP, TCP_DEFER_ACCEPT, s->defer_accept / USEC_PER_SEC);
                 if (r < 0)
-                        log_unit_warning_errno(UNIT(s), r, "TCP_DEFER_ACCEPT failed: %m");
+                        log_unit_warning_errno(UNIT(s), r, "TCP_DEFER_ACCEPT failed, ignoring: %m");
         }
 
         if (s->no_delay) {
                 if (s->socket_protocol == IPPROTO_SCTP) {
                         r = setsockopt_int(fd, SOL_SCTP, SCTP_NODELAY, true);
                         if (r < 0)
-                                log_unit_warning_errno(UNIT(s), r, "SCTP_NODELAY failed: %m");
+                                log_unit_warning_errno(UNIT(s), r, "SCTP_NODELAY failed, ignoring: %m");
                 } else {
                         r = setsockopt_int(fd, SOL_TCP, TCP_NODELAY, true);
                         if (r < 0)
-                                log_unit_warning_errno(UNIT(s), r, "TCP_NODELAY failed: %m");
+                                log_unit_warning_errno(UNIT(s), r, "TCP_NODELAY failed, ignoring: %m");
                 }
         }
 
         if (s->broadcast) {
                 r = setsockopt_int(fd, SOL_SOCKET, SO_BROADCAST, true);
                 if (r < 0)
-                        log_unit_warning_errno(UNIT(s), r, "SO_BROADCAST failed: %m");
+                        log_unit_warning_errno(UNIT(s), r, "SO_BROADCAST failed, ignoring: %m");
         }
 
         if (s->pass_cred) {
                 r = setsockopt_int(fd, SOL_SOCKET, SO_PASSCRED, true);
                 if (r < 0)
-                        log_unit_warning_errno(UNIT(s), r, "SO_PASSCRED failed: %m");
+                        log_unit_warning_errno(UNIT(s), r, "SO_PASSCRED failed, ignoring: %m");
         }
 
         if (s->pass_sec) {
                 r = setsockopt_int(fd, SOL_SOCKET, SO_PASSSEC, true);
                 if (r < 0)
-                        log_unit_warning_errno(UNIT(s), r, "SO_PASSSEC failed: %m");
+                        log_unit_full_errno(UNIT(s), ERRNO_IS_NEG_NOT_SUPPORTED(r) ? LOG_DEBUG : LOG_WARNING, r, "SO_PASSSEC failed, ignoring: %m");
         }
 
         if (s->pass_pktinfo) {
                 r = socket_set_recvpktinfo(fd, socket_address_family(&p->address), true);
                 if (r < 0)
-                        log_unit_warning_errno(UNIT(s), r, "Failed to enable packet info socket option: %m");
+                        log_unit_warning_errno(UNIT(s), r, "Failed to enable packet info socket option, ignoring: %m");
         }
 
         if (s->timestamping != SOCKET_TIMESTAMPING_OFF) {
@@ -1092,55 +1095,55 @@ static void socket_apply_socket_options(Socket *s, SocketPort *p, int fd) {
         if (s->priority >= 0) {
                 r = setsockopt_int(fd, SOL_SOCKET, SO_PRIORITY, s->priority);
                 if (r < 0)
-                        log_unit_warning_errno(UNIT(s), r, "SO_PRIORITY failed: %m");
+                        log_unit_warning_errno(UNIT(s), r, "SO_PRIORITY failed, ignoring: %m");
         }
 
         if (s->receive_buffer > 0) {
                 r = fd_set_rcvbuf(fd, s->receive_buffer, false);
                 if (r < 0)
                         log_unit_full_errno(UNIT(s), ERRNO_IS_PRIVILEGE(r) ? LOG_DEBUG : LOG_WARNING, r,
-                                            "SO_RCVBUF/SO_RCVBUFFORCE failed: %m");
+                                            "SO_RCVBUF/SO_RCVBUFFORCE failed, ignoring: %m");
         }
 
         if (s->send_buffer > 0) {
                 r = fd_set_sndbuf(fd, s->send_buffer, false);
                 if (r < 0)
                         log_unit_full_errno(UNIT(s), ERRNO_IS_PRIVILEGE(r) ? LOG_DEBUG : LOG_WARNING, r,
-                                            "SO_SNDBUF/SO_SNDBUFFORCE failed: %m");
+                                            "SO_SNDBUF/SO_SNDBUFFORCE failed, ignoring: %m");
         }
 
         if (s->mark >= 0) {
                 r = setsockopt_int(fd, SOL_SOCKET, SO_MARK, s->mark);
                 if (r < 0)
-                        log_unit_warning_errno(UNIT(s), r, "SO_MARK failed: %m");
+                        log_unit_warning_errno(UNIT(s), r, "SO_MARK failed, ignoring: %m");
         }
 
         if (s->ip_tos >= 0) {
                 r = setsockopt_int(fd, IPPROTO_IP, IP_TOS, s->ip_tos);
                 if (r < 0)
-                        log_unit_warning_errno(UNIT(s), r, "IP_TOS failed: %m");
+                        log_unit_warning_errno(UNIT(s), r, "IP_TOS failed, ignoring: %m");
         }
 
         if (s->ip_ttl >= 0) {
                 r = socket_set_ttl(fd, socket_address_family(&p->address), s->ip_ttl);
                 if (r < 0)
-                        log_unit_warning_errno(UNIT(s), r, "IP_TTL/IPV6_UNICAST_HOPS failed: %m");
+                        log_unit_warning_errno(UNIT(s), r, "IP_TTL/IPV6_UNICAST_HOPS failed, ignoring: %m");
         }
 
         if (s->tcp_congestion)
                 if (setsockopt(fd, SOL_TCP, TCP_CONGESTION, s->tcp_congestion, strlen(s->tcp_congestion)+1) < 0)
-                        log_unit_warning_errno(UNIT(s), errno, "TCP_CONGESTION failed: %m");
+                        log_unit_warning_errno(UNIT(s), errno, "TCP_CONGESTION failed, ignoring: %m");
 
         if (s->smack_ip_in) {
                 r = mac_smack_apply_fd(fd, SMACK_ATTR_IPIN, s->smack_ip_in);
                 if (r < 0)
-                        log_unit_error_errno(UNIT(s), r, "mac_smack_apply_ip_in_fd: %m");
+                        log_unit_error_errno(UNIT(s), r, "Failed to apply SMACK label for IP input, ignoring: %m");
         }
 
         if (s->smack_ip_out) {
                 r = mac_smack_apply_fd(fd, SMACK_ATTR_IPOUT, s->smack_ip_out);
                 if (r < 0)
-                        log_unit_error_errno(UNIT(s), r, "mac_smack_apply_ip_out_fd: %m");
+                        log_unit_error_errno(UNIT(s), r, "Failed to apply SMACK label for IP output, ignoring: %m");
         }
 }
 

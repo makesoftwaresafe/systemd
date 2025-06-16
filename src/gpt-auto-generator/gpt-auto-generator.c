@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <sys/file.h>
-#include <unistd.h>
 
 #include "sd-id128.h"
 
@@ -817,7 +816,7 @@ static int add_root_mount(void) {
                         return 0;
                 }
 
-                r = efi_loader_get_device_part_uuid(/* ret_uuid= */ NULL);
+                r = efi_loader_get_device_part_uuid(/* ret= */ NULL);
                 if (r == -ENOENT) {
                         log_notice("EFI loader partition unknown, not processing %s.\n"
                                    "(The boot loader did not set EFI variable LoaderDevicePartUUID.)",

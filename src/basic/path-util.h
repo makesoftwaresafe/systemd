@@ -1,11 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-#include <stdbool.h>
-#include <stddef.h>
-
-#include "macro.h"
-#include "time-util.h"
+#include "forward.h"
 
 #define PATH_SPLIT_BIN(x) x "sbin:" x "bin"
 #define PATH_SPLIT_BIN_NULSTR(x) x "sbin\0" x "bin\0"
@@ -43,9 +39,15 @@ int safe_getcwd(char **ret);
 int path_make_absolute_cwd(const char *p, char **ret);
 int path_make_relative(const char *from, const char *to, char **ret);
 int path_make_relative_parent(const char *from_child, const char *to, char **ret);
-char* path_startswith_full(const char *path, const char *prefix, bool accept_dot_dot) _pure_;
+
+typedef enum PathStartWithFlags {
+        PATH_STARTSWITH_REFUSE_DOT_DOT       = 1U << 0,
+        PATH_STARTSWITH_RETURN_LEADING_SLASH = 1U << 1,
+} PathStartWithFlags;
+
+char* path_startswith_full(const char *path, const char *prefix, PathStartWithFlags flags) _pure_;
 static inline char* path_startswith(const char *path, const char *prefix) {
-        return path_startswith_full(path, prefix, true);
+        return path_startswith_full(path, prefix, 0);
 }
 
 int path_compare(const char *a, const char *b) _pure_;
@@ -156,14 +158,14 @@ int file_in_same_dir(const char *path, const char *filename, char **ret);
 
 bool hidden_or_backup_file(const char *filename) _pure_;
 
-bool is_device_path(const char *path);
+bool is_device_path(const char *path) _pure_;
 
-bool valid_device_node_path(const char *path);
-bool valid_device_allow_pattern(const char *path);
+bool valid_device_node_path(const char *path) _pure_;
+bool valid_device_allow_pattern(const char *path) _pure_;
 
-bool dot_or_dot_dot(const char *path);
+bool dot_or_dot_dot(const char *path) _pure_;
 
-bool path_implies_directory(const char *path);
+bool path_implies_directory(const char *path) _pure_;
 
 static inline const char* skip_dev_prefix(const char *p) {
         const char *e;
@@ -175,7 +177,7 @@ static inline const char* skip_dev_prefix(const char *p) {
         return e ?: p;
 }
 
-bool empty_or_root(const char *path);
+bool empty_or_root(const char *path) _pure_;
 const char* empty_to_root(const char *path) _pure_;
 
 bool path_strv_contains(char * const *l, const char *path);
