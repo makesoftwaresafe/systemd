@@ -4,8 +4,9 @@
 
 #include "sd-daemon.h"
 #include "sd-event.h"
-#include "sd-varlink.h"
+#include "sd-journal.h"
 
+#include "alloc-util.h"
 #include "ansi-color.h"
 #include "fileio.h"
 #include "journalctl.h"
@@ -13,8 +14,13 @@
 #include "journalctl-show.h"
 #include "journalctl-util.h"
 #include "journalctl-varlink.h"
+#include "log.h"
 #include "logs-show.h"
+#include "output-mode.h"
+#include "pager.h"
+#include "string-util.h"
 #include "terminal-util.h"
+#include "time-util.h"
 
 #define PROCESS_INOTIFY_INTERVAL 1024   /* Every 1024 messages processed */
 
@@ -427,8 +433,8 @@ static int setup_event(Context *c, int fd) {
         if (r < 0)
                 return log_error_errno(r, "Failed to allocate sd_event object: %m");
 
-        (void) sd_event_add_signal(e, /* ret_event_source= */ NULL, SIGTERM | SD_EVENT_SIGNAL_PROCMASK, on_signal, c);
-        (void) sd_event_add_signal(e, /* ret_event_source= */ NULL, SIGINT | SD_EVENT_SIGNAL_PROCMASK, on_signal, c);
+        (void) sd_event_add_signal(e, /* ret= */ NULL, SIGTERM | SD_EVENT_SIGNAL_PROCMASK, on_signal, c);
+        (void) sd_event_add_signal(e, /* ret= */ NULL, SIGINT | SD_EVENT_SIGNAL_PROCMASK, on_signal, c);
 
         r = sd_event_add_io(e, NULL, fd, EPOLLIN, &on_journal_event, c);
         if (r < 0)

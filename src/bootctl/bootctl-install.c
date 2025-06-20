@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
+#include <stdlib.h>
+#include <unistd.h>
+
 #include "alloc-util.h"
+#include "boot-entry.h"
 #include "bootctl.h"
 #include "bootctl-install.h"
 #include "bootctl-random-seed.h"
@@ -10,7 +14,9 @@
 #include "dirent-util.h"
 #include "efi-api.h"
 #include "efi-fundamental.h"
+#include "efivars.h"
 #include "env-file.h"
+#include "env-util.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
@@ -18,12 +24,17 @@
 #include "id128-util.h"
 #include "io-util.h"
 #include "kernel-config.h"
-#include "os-util.h"
+#include "log.h"
+#include "openssl-util.h"
 #include "parse-argument.h"
 #include "path-util.h"
+#include "pe-binary.h"
 #include "rm-rf.h"
 #include "stat-util.h"
+#include "string-util.h"
+#include "strv.h"
 #include "sync-util.h"
+#include "time-util.h"
 #include "tmpfile-util.h"
 #include "umask-util.h"
 #include "utf8.h"
@@ -208,7 +219,7 @@ static int version_check(int fd_from, const char *from, int fd_to, const char *t
                                         "Skipping \"%s\", it's owned by another boot loader.", to);
 
         r = compare_version(a, b);
-        log_debug("Comparing versions: \"%s\" %s \"%s", a, comparison_operator(r), b);
+        log_debug("Comparing versions: \"%s\" %s \"%s\"", a, comparison_operator(r), b);
         if (r < 0)
                 return log_warning_errno(SYNTHETIC_ERRNO(ESTALE),
                                          "Skipping \"%s\", newer boot loader version in place already.", to);
@@ -342,24 +353,31 @@ static int update_efi_boot_binaries(const char *esp_path, const char *source_pat
                 if (!endswith_no_case(de->d_name, ".efi"))
                         continue;
 
-                fd = openat(dirfd(d), de->d_name, O_RDONLY|O_CLOEXEC);
+                fd = xopenat_full(dirfd(d), de->d_name, O_RDONLY|O_CLOEXEC|O_NONBLOCK|O_NOCTTY|O_NOFOLLOW, XO_REGULAR, /* mode= */ 0);
                 if (fd < 0)
-                        return log_error_errno(errno, "Failed to open \"%s/%s\" for reading: %m", p, de->d_name);
+                        return log_error_errno(fd, "Failed to open \"%s/%s\" for reading: %m", p, de->d_name);
+
+                r = pe_is_native_fd(fd);
+                if (r < 0) {
+                        log_warning_errno(r, "Failed to detect if \"%s/%s\" is native architecture, ignoring: %m", p, de->d_name);
+                        continue;
+                }
+                if (r == 0)
+                        continue;
 
                 r = get_file_version(fd, &v);
                 if (r == -ESRCH)
                         continue;  /* No version information */
                 if (r < 0)
                         return r;
-                if (startswith(v, "systemd-boot ")) {
-                        _cleanup_free_ char *dest_path = NULL;
+                if (!startswith(v, "systemd-boot "))
+                        continue;
 
-                        dest_path = path_join(p, de->d_name);
-                        if (!dest_path)
-                                return log_oom();
+                _cleanup_free_ char *dest_path = path_join(p, de->d_name);
+                if (!dest_path)
+                        return log_oom();
 
-                        RET_GATHER(ret, copy_file_with_version_check(source_path, dest_path, /* force = */ false));
-                }
+                RET_GATHER(ret, copy_file_with_version_check(source_path, dest_path, /* force = */ false));
         }
 
         return ret;
@@ -870,7 +888,7 @@ static int install_variables(
         if (r == -ENOENT)
                 return 0;
         if (r < 0)
-                return log_error_errno(r, "Cannot access \"%s/%s\": %m", esp_path, path);
+                return log_error_errno(r, "Cannot access \"%s/%s\": %m", esp_path, skip_leading_slash(path));
 
         r = find_slot(uuid, path, &slot);
         if (r < 0) {
@@ -1095,9 +1113,17 @@ static int remove_boot_efi(const char *esp_path) {
                 if (!endswith_no_case(de->d_name, ".efi"))
                         continue;
 
-                fd = openat(dirfd(d), de->d_name, O_RDONLY|O_CLOEXEC);
+                fd = xopenat_full(dirfd(d), de->d_name, O_RDONLY|O_CLOEXEC|O_NONBLOCK|O_NOCTTY|O_NOFOLLOW, XO_REGULAR, /* mode= */ 0);
                 if (fd < 0)
-                        return log_error_errno(errno, "Failed to open \"%s/%s\" for reading: %m", p, de->d_name);
+                        return log_error_errno(fd, "Failed to open \"%s/%s\" for reading: %m", p, de->d_name);
+
+                r = pe_is_native_fd(fd);
+                if (r < 0) {
+                        log_warning_errno(r, "Failed to detect if \"%s/%s\" is native architecture, ignoring: %m", p, de->d_name);
+                        continue;
+                }
+                if (r == 0)
+                        continue;
 
                 r = get_file_version(fd, &v);
                 if (r == -ESRCH)
@@ -1105,8 +1131,7 @@ static int remove_boot_efi(const char *esp_path) {
                 if (r < 0)
                         return r;
                 if (startswith(v, "systemd-boot ")) {
-                        r = unlinkat(dirfd(d), de->d_name, 0);
-                        if (r < 0)
+                        if (unlinkat(dirfd(d), de->d_name, 0) < 0)
                                 return log_error_errno(errno, "Failed to remove \"%s/%s\": %m", p, de->d_name);
 
                         log_info("Removed \"%s/%s\".", p, de->d_name);

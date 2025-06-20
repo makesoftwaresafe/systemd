@@ -1,31 +1,36 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <sched.h>
-#include <signal.h>
 #include <stdlib.h>
 #include <sys/mman.h>
-#include <sys/mount.h>
+#include <sys/prctl.h>
 #include <sys/wait.h>
 
 #include "sd-bus.h"
+#include "sd-daemon.h"
 
 #include "alloc-util.h"
+#include "argv-util.h"
 #include "bus-error.h"
 #include "bus-locator.h"
 #include "bus-util.h"
 #include "bus-wait-for-jobs.h"
 #include "cgroup-setup.h"
 #include "cgroup-util.h"
+#include "coredump-util.h"
 #include "env-file.h"
 #include "env-util.h"
+#include "errno-util.h"
+#include "extract-word.h"
 #include "fd-util.h"
 #include "fs-util.h"
+#include "hexdecoct.h"
 #include "log.h"
-#include "mountpoint-util.h"
 #include "namespace-util.h"
 #include "path-util.h"
 #include "process-util.h"
 #include "random-util.h"
+#include "rlimit-util.h"
 #include "strv.h"
 #include "tests.h"
 #include "tmpfile-util.h"
@@ -327,6 +332,10 @@ int enter_cgroup_root(char **ret_cgroup) {
         return enter_cgroup(ret_cgroup, false);
 }
 
+int define_hex_ptr_internal(const char *hex, void **name, size_t *name_len) {
+        return unhexmem_full(hex, strlen_ptr(hex), false, name, name_len);
+}
+
 const char* ci_environment(void) {
         /* We return a string because we might want to provide multiple bits of information later on: not
          * just the general CI environment type, but also whether we're sanitizing or not, etc. The caller is
@@ -428,7 +437,8 @@ int assert_signal_internal(void) {
 
         if (r == 0) {
                 /* Speed things up by never even attempting to generate a coredump */
-                (void) prctl(PR_SET_DUMPABLE, 0);
+                (void) set_dumpable(SUID_DUMP_DISABLE);
+
                 /* But still set an rlimit just in case */
                 (void) setrlimit(RLIMIT_CORE, &RLIMIT_MAKE_CONST(0));
                 return 0;

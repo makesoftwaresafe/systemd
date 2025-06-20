@@ -2,11 +2,14 @@
 
 #include <linux/nexthop.h>
 
+#include "sd-device.h"
+#include "sd-dhcp-client.h"
+#include "sd-dhcp6-client.h"
+
 #include "dhcp-lease-internal.h"
 #include "dhcp-server-lease-internal.h"
-#include "dhcp6-internal.h"
 #include "dhcp6-lease-internal.h"
-#include "dns-domain.h"
+#include "extract-word.h"
 #include "ip-protocol-list.h"
 #include "json-util.h"
 #include "netif-util.h"
@@ -22,10 +25,11 @@
 #include "networkd-route.h"
 #include "networkd-route-util.h"
 #include "networkd-routing-policy-rule.h"
-#include "sort-util.h"
+#include "ordered-set.h"
+#include "set.h"
+#include "string-util.h"
 #include "strv.h"
 #include "udev-util.h"
-#include "user-util.h"
 #include "wifi-util.h"
 
 static int address_append_json(Address *address, bool serializing, sd_json_variant **array) {
@@ -926,7 +930,7 @@ static int domains_append_json(Link *link, bool is_route, sd_json_variant **v) {
                         NDiscDNSSL *a;
 
                         SET_FOREACH(a, link->ndisc_dnssl) {
-                                r = domain_append_json(AF_INET6, NDISC_DNSSL_DOMAIN(a), NETWORK_CONFIG_SOURCE_NDISC,
+                                r = domain_append_json(AF_INET6, ndisc_dnssl_domain(a), NETWORK_CONFIG_SOURCE_NDISC,
                                                        &(union in_addr_union) { .in6 = a->router },
                                                        &array);
                                 if (r < 0)
@@ -1400,6 +1404,23 @@ static int dhcp_client_append_json(Link *link, sd_json_variant **v) {
         return json_variant_set_field_non_null(v, "DHCPv4Client", w);
 }
 
+static int lldp_tx_append_json(Link *link, sd_json_variant **v) {
+        _cleanup_(sd_json_variant_unrefp) sd_json_variant *w = NULL;
+        int r;
+
+        assert(link);
+        assert(v);
+
+        if (!link->lldp_tx)
+                return 0;
+
+        r = sd_lldp_tx_describe(link->lldp_tx, &w);
+        if (r < 0)
+                return r;
+
+        return json_variant_set_field_non_null(v, "LLDP", w);
+}
+
 int link_build_json(Link *link, sd_json_variant **ret) {
         _cleanup_(sd_json_variant_unrefp) sd_json_variant *v = NULL;
         _cleanup_free_ char *type = NULL, *flags = NULL;
@@ -1533,6 +1554,10 @@ int link_build_json(Link *link, sd_json_variant **ret) {
                 return r;
 
         r = dhcp6_client_append_json(link, &v);
+        if (r < 0)
+                return r;
+
+        r = lldp_tx_append_json(link, &v);
         if (r < 0)
                 return r;
 

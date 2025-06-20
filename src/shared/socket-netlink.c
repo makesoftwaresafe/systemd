@@ -1,21 +1,16 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <arpa/inet.h>
-#include <errno.h>
 #include <linux/net_namespace.h>
 #include <linux/unix_diag.h>
-#include <net/if.h>
 #include <string.h>
 #include <sys/stat.h>
 
 #include "sd-netlink.h"
 
 #include "alloc-util.h"
-#include "errno-util.h"
 #include "extract-word.h"
 #include "fd-util.h"
 #include "log.h"
-#include "memory-util.h"
 #include "namespace-util.h"
 #include "netlink-sock-diag.h"
 #include "netlink-util.h"
@@ -515,7 +510,7 @@ int af_unix_get_qlen(int fd, uint32_t *ret) {
                 return r;
 
         _cleanup_(sd_netlink_message_unrefp) sd_netlink_message *reply = NULL;
-        r = sd_netlink_call(nl, message, /* usec= */ 0, &reply);
+        r = sd_netlink_call(nl, message, /* timeout= */ 0, &reply);
         if (r < 0)
                 return r;
 

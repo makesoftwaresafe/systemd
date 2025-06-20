@@ -1,18 +1,23 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <errno.h>
 #include <sys/eventfd.h>
+
+#include "sd-bus.h"
+#include "sd-device.h"
 
 #include "alloc-util.h"
 #include "bus-common-errors.h"
 #include "bus-get-properties.h"
 #include "bus-label.h"
+#include "bus-object.h"
 #include "bus-polkit.h"
-#include "bus-util.h"
 #include "device-util.h"
 #include "devnum-util.h"
+#include "errno-util.h"
 #include "fd-util.h"
 #include "format-util.h"
+#include "hashmap.h"
+#include "log.h"
 #include "logind.h"
 #include "logind-brightness.h"
 #include "logind-dbus.h"
@@ -26,8 +31,10 @@
 #include "logind-user-dbus.h"
 #include "path-util.h"
 #include "signal-util.h"
+#include "string-util.h"
 #include "strv.h"
 #include "terminal-util.h"
+#include "user-record.h"
 #include "user-util.h"
 
 static int property_get_user(
@@ -986,6 +993,7 @@ static const sd_bus_vtable session_vtable[] = {
         SD_BUS_PROPERTY("Desktop", "s", NULL, offsetof(Session, desktop), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("Scope", "s", NULL, offsetof(Session, scope), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("Leader", "u", bus_property_get_pid, offsetof(Session, leader.pid), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("LeaderPIDFDId", "t", bus_property_get_pidfdid, offsetof(Session, leader), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("Audit", "u", NULL, offsetof(Session, audit_id), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("Type", "s", property_get_type, offsetof(Session, type), SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
         SD_BUS_PROPERTY("Class", "s", property_get_class, offsetof(Session, class), SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),

@@ -1,21 +1,14 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <errno.h>
-#include <stdarg.h>
-#include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 
 #include "alloc-util.h"
 #include "escape.h"
 #include "extract-word.h"
-#include "fd-util.h"
-#include "fileio.h"
 #include "glyph-util.h"
 #include "gunicode.h"
 #include "locale-util.h"
 #include "log.h"
-#include "macro.h"
 #include "memory-util.h"
 #include "memstream-util.h"
 #include "path-util.h"
@@ -45,20 +38,6 @@ char* first_word(const char *s, const char *word) {
                 return NULL;
 
         return (char*) nw;
-}
-
-char* strprepend(char **x, const char *s) {
-        assert(x);
-
-        if (isempty(s) && *x)
-                return *x;
-
-        char *p = strjoin(strempty(s), *x);
-        if (!p)
-                return NULL;
-
-        free_and_replace(*x, p);
-        return *x;
 }
 
 char* strextendn(char **x, const char *s, size_t l) {
@@ -1381,6 +1360,46 @@ char* find_line_startswith(const char *haystack, const char *needle) {
                 }
 
         return p + strlen(needle);
+}
+
+char* find_line(const char *haystack, const char *needle) {
+        char *p;
+
+        assert(haystack);
+        assert(needle);
+
+        /* Finds the first line in 'haystack' that match the specified string. Returns a pointer to the
+         * beginning of the line */
+
+        p = find_line_startswith(haystack, needle);
+        if (!p)
+                return NULL;
+
+        if (*p == 0 || strchr(NEWLINE, *p))
+                return p - strlen(needle);
+
+        return NULL;
+}
+
+char* find_line_after(const char *haystack, const char *needle) {
+        char *p;
+
+        assert(haystack);
+        assert(needle);
+
+        /* Finds the first line in 'haystack' that match the specified string. Returns a pointer to the
+         * next line after it */
+
+        p = find_line_startswith(haystack, needle);
+        if (!p)
+                return NULL;
+
+        if (*p == 0)
+                return p;
+        if (strchr(NEWLINE, *p))
+                return p + 1;
+
+        return NULL;
 }
 
 bool version_is_valid(const char *s) {

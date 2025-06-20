@@ -17,9 +17,6 @@
   along with systemd; If not, see <https://www.gnu.org/licenses/>.
 ***/
 
-#include <stdarg.h>
-#include <sys/types.h>
-
 #include "_sd-common.h"
 #include "sd-event.h"
 #include "sd-json.h"
@@ -71,6 +68,7 @@ __extension__ typedef enum _SD_ENUM_TYPE_S64(sd_varlink_server_flags_t) {
         SD_VARLINK_SERVER_INPUT_SENSITIVE         = 1 << 4, /* Automatically mark all connection input as sensitive */
         SD_VARLINK_SERVER_ALLOW_FD_PASSING_INPUT  = 1 << 5, /* Allow receiving fds over all connections */
         SD_VARLINK_SERVER_ALLOW_FD_PASSING_OUTPUT = 1 << 6, /* Allow sending fds over all connections */
+        SD_VARLINK_SERVER_FD_PASSING_INPUT_STRICT = 1 << 7, /* Reject input messages with fds if fd passing is disabled (needs kernel v6.16+) */
         _SD_ENUM_FORCE_S64(SD_VARLINK_SERVER)
 } sd_varlink_server_flags_t;
 
@@ -242,7 +240,7 @@ int sd_varlink_server_listen_fd(sd_varlink_server *s, int fd);
 int sd_varlink_server_listen_auto(sd_varlink_server *s);
 int sd_varlink_server_listen_name(sd_varlink_server *s, const char *name);
 int sd_varlink_server_add_connection(sd_varlink_server *s, int fd, sd_varlink **ret);
-int sd_varlink_server_add_connection_pair(sd_varlink_server *s, int input_fd, int output_fd, const struct ucred *ucred_override, sd_varlink **ret);
+int sd_varlink_server_add_connection_pair(sd_varlink_server *s, int input_fd, int output_fd, const struct ucred *override_ucred, sd_varlink **ret);
 int sd_varlink_server_add_connection_stdio(sd_varlink_server *s, sd_varlink **ret);
 
 /* Bind callbacks */

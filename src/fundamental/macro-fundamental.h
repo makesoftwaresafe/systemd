@@ -396,6 +396,10 @@ assert_cc(sizeof(long long) == sizeof(intmax_t));
  */
 #define STRLEN(x) (sizeof(""x"") - sizeof(typeof(x[0])))
 
+DISABLE_WARNING_REDUNDANT_DECLS;
+void free(void *p);
+REENABLE_WARNING;
+
 #define mfree(memory)                           \
         ({                                      \
                 free(memory);                   \
@@ -444,6 +448,7 @@ assert_cc(sizeof(dummy_t) == 0);
         #define DECLARE_SBAT(text)
 #endif
 
+#define typeof_field(struct_type, member) typeof(((struct_type *) 0)->member)
 #define sizeof_field(struct_type, member) sizeof(((struct_type *) 0)->member)
 #define endoffsetof_field(struct_type, member) (offsetof(struct_type, member) + sizeof_field(struct_type, member))
 #define voffsetof(v, member) offsetof(typeof(v), member)

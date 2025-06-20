@@ -466,7 +466,7 @@ static int load_unix_sockets(Context *c) {
         f = fopen("/proc/net/unix", "re");
         if (!f)
                 return log_full_errno(errno == ENOENT ? LOG_DEBUG : LOG_WARNING, errno,
-                                      "Failed to open /proc/net/unix, ignoring: %m");
+                                      "Failed to open %s, ignoring: %m", "/proc/net/unix");
 
         /* Skip header */
         r = read_line(f, LONG_LINE_MAX, NULL);
@@ -1653,7 +1653,7 @@ static int fd_set_attribute(
                                     "previous=0x%08x, current=0x%08x, expected=0x%08x, ignoring.",
                                     path, previous, current, (previous & ~item->attribute_mask) | (f & item->attribute_mask));
                 else if (r < 0)
-                        log_full_errno(ERRNO_IS_NOT_SUPPORTED(r) ? LOG_DEBUG : LOG_WARNING, r,
+                        log_full_errno(ERRNO_IS_IOCTL_NOT_SUPPORTED(r) ? LOG_DEBUG : LOG_WARNING, r,
                                        "Cannot set file attributes for '%s', value=0x%08x, mask=0x%08x, ignoring: %m",
                                        path, item->attribute_value, item->attribute_mask);
         }
@@ -2471,17 +2471,13 @@ static int create_symlink(Context *c, Item *i) {
 
                 fd = safe_close(fd);
 
-                mac_selinux_create_file_prepare(i->path, S_IFLNK);
-                r = symlinkat_atomic_full(i->argument, pfd, bn, /* make_relative= */ false);
-                mac_selinux_create_file_clear();
+                r = symlinkat_atomic_full(i->argument, pfd, bn, SYMLINK_LABEL);
                 if (IN_SET(r, -EISDIR, -EEXIST, -ENOTEMPTY)) {
                         r = rm_rf_child(pfd, bn, REMOVE_PHYSICAL);
                         if (r < 0)
                                 return log_error_errno(r, "rm -rf %s failed: %m", i->path);
 
-                        mac_selinux_create_file_prepare(i->path, S_IFLNK);
-                        r = RET_NERRNO(symlinkat(i->argument, pfd, i->path));
-                        mac_selinux_create_file_clear();
+                        r = symlinkat_atomic_full(i->argument, pfd, bn, SYMLINK_LABEL);
                 }
                 if (r < 0)
                         return log_error_errno(r, "symlink(%s, %s) failed: %m", i->argument, i->path);

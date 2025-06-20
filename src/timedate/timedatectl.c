@@ -14,12 +14,15 @@
 #include "bus-locator.h"
 #include "bus-map-properties.h"
 #include "bus-print-properties.h"
+#include "bus-util.h"
+#include "constants.h"
 #include "env-util.h"
 #include "format-table.h"
 #include "in-addr-util.h"
 #include "log.h"
 #include "main-func.h"
 #include "pager.h"
+#include "parse-argument.h"
 #include "parse-util.h"
 #include "polkit-agent.h"
 #include "pretty-print.h"
@@ -35,7 +38,7 @@
 static PagerFlags arg_pager_flags = 0;
 static bool arg_ask_password = true;
 static BusTransport arg_transport = BUS_TRANSPORT_LOCAL;
-static char *arg_host = NULL;
+static const char *arg_host = NULL;
 static bool arg_adjust_system_clock = false;
 static bool arg_monitor = false;
 static char **arg_property = NULL;
@@ -664,8 +667,14 @@ static int show_timesync_status_once(sd_bus *bus) {
                                    &error,
                                    &m,
                                    &info);
-        if (r < 0)
+        if (r < 0) {
+                if (bus_error_is_unknown_service(&error))
+                        return log_error_errno(r,
+                                               "Command requires systemd-timesyncd.service, but it is not available: %s",
+                                               bus_error_message(&error, r));
+
                 return log_error_errno(r, "Failed to query server: %s", bus_error_message(&error, r));
+        }
 
         if (arg_monitor && !terminal_is_dumb())
                 fputs(ANSI_HOME_CLEAR, stdout);
@@ -796,6 +805,7 @@ static int print_timesync_property(const char *name, const char *expected_value,
 }
 
 static int show_timesync(int argc, char **argv, void *userdata) {
+        _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         sd_bus *bus = ASSERT_PTR(userdata);
         int r;
 
@@ -805,9 +815,15 @@ static int show_timesync(int argc, char **argv, void *userdata) {
                                      print_timesync_property,
                                      arg_property,
                                      arg_print_flags,
-                                     NULL);
-        if (r < 0)
+                                     &error);
+        if (r < 0) {
+                if (bus_error_is_unknown_service(&error))
+                        return log_error_errno(r,
+                                               "Command requires systemd-timesyncd.service, but it is not available: %s",
+                                               bus_error_message(&error, r));
+
                 return bus_log_parse_error(r);
+        }
 
         return 0;
 }
@@ -981,8 +997,9 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case 'M':
-                        arg_transport = BUS_TRANSPORT_MACHINE;
-                        arg_host = optarg;
+                        r = parse_machine_argument(optarg, &arg_host, &arg_transport);
+                        if (r < 0)
+                                return r;
                         break;
 
                 case ARG_NO_ASK_PASSWORD:

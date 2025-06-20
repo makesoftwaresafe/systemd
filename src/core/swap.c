@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <errno.h>
-#include <sys/epoll.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -12,19 +11,22 @@
 #include "dbus-unit.h"
 #include "device.h"
 #include "device-util.h"
+#include "errno-util.h"
 #include "escape.h"
 #include "exit-status.h"
 #include "fd-util.h"
 #include "format-util.h"
 #include "fstab-util.h"
+#include "glyph-util.h"
 #include "manager.h"
-#include "parse-util.h"
 #include "path-util.h"
 #include "process-util.h"
 #include "serialize.h"
+#include "set.h"
 #include "special.h"
 #include "string-table.h"
 #include "string-util.h"
+#include "strv.h"
 #include "swap.h"
 #include "unit.h"
 #include "unit-name.h"
@@ -1315,7 +1317,7 @@ static void swap_enumerate(Manager *m) {
                         if (errno == ENOENT)
                                 log_debug_errno(errno, "Not swap enabled, skipping enumeration.");
                         else
-                                log_warning_errno(errno, "Failed to open /proc/swaps, ignoring: %m");
+                                log_warning_errno(errno, "Failed to open %s, ignoring: %m", "/proc/swaps");
 
                         return;
                 }

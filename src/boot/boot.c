@@ -1,27 +1,24 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <limits.h>
-
 #include "bcd.h"
 #include "bootspec-fundamental.h"
 #include "console.h"
 #include "device-path-util.h"
 #include "devicetree.h"
 #include "drivers.h"
+#include "efi-efivars.h"
+#include "efi-log.h"
 #include "efi-string-table.h"
-#include "efivars.h"
 #include "efivars-fundamental.h"
 #include "export-vars.h"
 #include "graphics.h"
 #include "initrd.h"
 #include "line-edit.h"
-#include "linux.h"
 #include "measure.h"
 #include "memory-util-fundamental.h"
 #include "part-discovery.h"
 #include "pe.h"
 #include "proto/block-io.h"
-#include "proto/device-path.h"
 #include "proto/load-file.h"
 #include "proto/simple-text-io.h"
 #include "random-seed.h"
@@ -2293,7 +2290,7 @@ static void boot_entry_add_type2(
                 boot_entry_parse_tries(entry, path, filename, u".efi");
 
                 if (!PE_SECTION_VECTOR_IS_SET(sections + SECTION_CMDLINE))
-                        return;
+                        continue;
 
                 content = mfree(content);
 
@@ -2691,7 +2688,8 @@ static EFI_STATUS call_image_start(
         if (err == EFI_UNSUPPORTED && entry->type == LOADER_LINUX) {
                 uint32_t compat_address;
 
-                err = pe_kernel_info(loaded_image->ImageBase, &compat_address, /* ret_size_in_memory= */ NULL);
+                err = pe_kernel_info(loaded_image->ImageBase, /* ret_entry_point= */ NULL, &compat_address,
+                                     /* ret_image_base= */ NULL, /* ret_size_in_memory= */ NULL);
                 if (err != EFI_SUCCESS) {
                         if (err != EFI_UNSUPPORTED)
                                 return log_error_status(err, "Error finding kernel compat entry address: %m");

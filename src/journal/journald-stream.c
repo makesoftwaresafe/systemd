@@ -1,13 +1,8 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <stddef.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
-#if HAVE_SELINUX
-#include <selinux/selinux.h>
-#endif
-
-#include "sd-daemon.h"
 #include "sd-event.h"
 
 #include "alloc-util.h"
@@ -27,8 +22,11 @@
 #include "journald-kmsg.h"
 #include "journald-manager.h"
 #include "journald-stream.h"
+#include "journald-sync.h"
 #include "journald-syslog.h"
 #include "journald-wall.h"
+#include "log.h"
+#include "log-ratelimit.h"
 #include "mkdir.h"
 #include "parse-util.h"
 #include "process-util.h"
@@ -39,7 +37,6 @@
 #include "syslog-util.h"
 #include "tmpfile-util.h"
 #include "unit-name.h"
-#include "user-util.h"
 
 #define STDOUT_STREAMS_MAX (64*1024)
 
@@ -650,10 +647,6 @@ int stdout_stream_install(Manager *m, int fd, StdoutStream **ret) {
         if (r < 0)
                 return log_ratelimit_error_errno(r, JOURNAL_LOG_RATELIMIT, "Failed to determine peer credentials: %m");
 
-        r = setsockopt_int(fd, SOL_SOCKET, SO_PASSCRED, true);
-        if (r < 0)
-                return log_error_errno(r, "SO_PASSCRED failed: %m");
-
         if (mac_selinux_use()) {
                 r = getpeersec(fd, &stream->label);
                 if (r < 0 && r != -EOPNOTSUPP)
@@ -920,6 +913,14 @@ int manager_open_stdout_socket(Manager *m, const char *stdout_socket) {
                         return log_error_errno(errno, "listen(%s) failed: %m", sa.un.sun_path);
         } else
                 (void) fd_nonblock(m->stdout_fd, true);
+
+        r = setsockopt_int(m->stdout_fd, SOL_SOCKET, SO_PASSCRED, true);
+        if (r < 0)
+                return log_error_errno(r, "Failed to enable SO_PASSCRED: %m");
+
+        r = setsockopt_int(m->stdout_fd, SOL_SOCKET, SO_PASSRIGHTS, false);
+        if (r < 0)
+                log_debug_errno(r, "Failed to turn off SO_PASSRIGHTS, ignoring: %m");
 
         r = sd_event_add_io(m->event, &m->stdout_event_source, m->stdout_fd, EPOLLIN, stdout_stream_new, m);
         if (r < 0)

@@ -2,8 +2,8 @@
 #pragma once
 
 #include "ask-password-api.h"
+#include "forward.h"
 #include "iovec-util.h"
-#include "memory-util.h"
 #include "sha256.h"
 
 typedef enum CertificateSourceType {
@@ -30,26 +30,26 @@ int parse_openssl_key_source_argument(const char *argument, char **private_key_s
 #define X509_FINGERPRINT_SIZE SHA256_DIGEST_SIZE
 
 #if HAVE_OPENSSL
-#  include <openssl/bio.h>
-#  include <openssl/bn.h>
-#  include <openssl/crypto.h>
-#  include <openssl/err.h>
-#  include <openssl/evp.h>
-#  include <openssl/opensslv.h>
-#  include <openssl/pkcs7.h>
-#  include <openssl/ssl.h>
-#  include <openssl/ui.h>
-#  include <openssl/x509v3.h>
+#  include <openssl/bio.h>              /* IWYU pragma: export */
+#  include <openssl/bn.h>               /* IWYU pragma: export */
+#  include <openssl/crypto.h>           /* IWYU pragma: export */
+#  include <openssl/err.h>              /* IWYU pragma: export */
+#  include <openssl/evp.h>              /* IWYU pragma: export */
+#  include <openssl/opensslv.h>         /* IWYU pragma: export */
+#  include <openssl/pkcs7.h>            /* IWYU pragma: export */
+#  include <openssl/ssl.h>              /* IWYU pragma: export */
+#  include <openssl/ui.h>               /* IWYU pragma: export */
+#  include <openssl/x509v3.h>           /* IWYU pragma: export */
 #  ifndef OPENSSL_VERSION_MAJOR
 /* OPENSSL_VERSION_MAJOR macro was added in OpenSSL 3. Thus, if it doesn't exist,  we must be before OpenSSL 3. */
 #    define OPENSSL_VERSION_MAJOR 1
 #  endif
 #  if OPENSSL_VERSION_MAJOR >= 3
-#    include <openssl/core_names.h>
-#    include <openssl/kdf.h>
-#    include <openssl/param_build.h>
-#    include <openssl/provider.h>
-#    include <openssl/store.h>
+#    include <openssl/core_names.h>     /* IWYU pragma: export */
+#    include <openssl/kdf.h>            /* IWYU pragma: export */
+#    include <openssl/param_build.h>    /* IWYU pragma: export */
+#    include <openssl/provider.h>       /* IWYU pragma: export */
+#    include <openssl/store.h>          /* IWYU pragma: export */
 #  endif
 
 DEFINE_TRIVIAL_CLEANUP_FUNC_FULL_MACRO(void*, OPENSSL_free, NULL);
@@ -165,7 +165,7 @@ int pubkey_fingerprint(EVP_PKEY *pk, const EVP_MD *md, void **ret, size_t *ret_s
 
 int digest_and_sign(const EVP_MD *md, EVP_PKEY *privkey, const void *data, size_t size, void **ret, size_t *ret_size);
 
-int pkcs7_new(X509 *certificate, EVP_PKEY *private_key, PKCS7 **ret_p7, PKCS7_SIGNER_INFO **ret_si);
+int pkcs7_new(X509 *certificate, EVP_PKEY *private_key, const char *hash_algorithm, PKCS7 **ret_p7, PKCS7_SIGNER_INFO **ret_si);
 
 int string_hashsum(const char *s, size_t len, const char *md_algorithm, char **ret);
 

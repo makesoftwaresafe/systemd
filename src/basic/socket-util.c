@@ -1,8 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <arpa/inet.h>
-#include <errno.h>
-#include <limits.h>
+#include <fcntl.h>
 #include <linux/if.h>
 #include <linux/if_arp.h>
 #include <mqueue.h>
@@ -10,10 +8,7 @@
 #include <netdb.h>
 #include <netinet/ip.h>
 #include <poll.h>
-#include <stddef.h>
-#include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
@@ -21,32 +16,28 @@
 #include "errno-util.h"
 #include "escape.h"
 #include "fd-util.h"
-#include "fileio.h"
 #include "format-ifname.h"
+#include "format-util.h"
+#include "in-addr-util.h"
 #include "io-util.h"
 #include "log.h"
 #include "memory-util.h"
 #include "parse-util.h"
 #include "path-util.h"
+#include "pidref.h"
 #include "process-util.h"
 #include "random-util.h"
 #include "socket-util.h"
+#include "sparse-endian.h"
 #include "string-table.h"
 #include "string-util.h"
 #include "strv.h"
 #include "sysctl-util.h"
-#include "user-util.h"
-#include "utf8.h"
 
 #if ENABLE_IDN
 #  define IDN_FLAGS NI_IDN
 #else
 #  define IDN_FLAGS 0
-#endif
-
-/* From the kernel's include/net/scm.h */
-#ifndef SCM_MAX_FD
-#  define SCM_MAX_FD 253
 #endif
 
 static const char* const socket_address_type_table[] = {
@@ -1533,6 +1524,22 @@ int sockaddr_un_set_path(struct sockaddr_un *ret, const char *path) {
         }
 }
 
+int getsockopt_int(int fd, int level, int optname, int *ret) {
+        int v;
+        socklen_t sl = sizeof(v);
+
+        assert(fd >= 0);
+        assert(ret);
+
+        if (getsockopt(fd, level, optname, &v, &sl) < 0)
+                return negative_errno();
+        if (sl != sizeof(v))
+                return -EIO;
+
+        *ret = v;
+        return 0;
+}
+
 int socket_bind_to_ifname(int fd, const char *ifname) {
         assert(fd >= 0);
 
@@ -1918,7 +1925,7 @@ int vsock_get_local_cid(unsigned *ret) {
 
         vsock_fd = open("/dev/vsock", O_RDONLY|O_CLOEXEC);
         if (vsock_fd < 0)
-                return log_debug_errno(errno, "Failed to open /dev/vsock: %m");
+                return log_debug_errno(errno, "Failed to open %s: %m", "/dev/vsock");
 
         unsigned tmp;
         if (ioctl(vsock_fd, IOCTL_VM_SOCKETS_GET_LOCAL_CID, ret ?: &tmp) < 0)
@@ -1973,4 +1980,22 @@ int socket_get_cookie(int fd, uint64_t *ret) {
                 *ret = cookie;
 
         return 0;
+}
+
+void cmsg_close_all(struct msghdr *mh) {
+        assert(mh);
+
+        struct cmsghdr *cmsg;
+        CMSG_FOREACH(cmsg, mh) {
+                if (cmsg->cmsg_level != SOL_SOCKET)
+                        continue;
+
+                if (cmsg->cmsg_type == SCM_RIGHTS)
+                        close_many(CMSG_TYPED_DATA(cmsg, int),
+                                   (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int));
+                else if (cmsg->cmsg_type == SCM_PIDFD) {
+                        assert(cmsg->cmsg_len == CMSG_LEN(sizeof(int)));
+                        safe_close(*CMSG_TYPED_DATA(cmsg, int));
+                }
+        }
 }

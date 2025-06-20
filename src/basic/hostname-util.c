@@ -1,11 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <errno.h>
-#include <limits.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <sys/utsname.h>
-#include <unistd.h>
 
 #include "alloc-util.h"
 #include "env-file.h"
@@ -14,6 +9,7 @@
 #include "os-util.h"
 #include "string-util.h"
 #include "strv.h"
+#include "user-util.h"
 
 char* get_default_hostname_raw(void) {
         int r;
@@ -176,4 +172,66 @@ int get_pretty_hostname(char **ret) {
 
         *ret = TAKE_PTR(n);
         return 0;
+}
+
+int split_user_at_host(const char *s, char **ret_user, char **ret_host) {
+        _cleanup_free_ char *u = NULL, *h = NULL;
+
+        /* Splits a user@host expression (one of those we accept on --machine= and similar). Returns NULL in
+         * each of the two return parameters if that part was left empty. */
+
+        assert(s);
+
+        const char *rhs = strchr(s, '@');
+        if (rhs) {
+                if (ret_user && rhs > s) {
+                        u = strndup(s, rhs - s);
+                        if (!u)
+                                return -ENOMEM;
+                }
+
+                if (ret_host && rhs[1] != 0) {
+                        h = strdup(rhs + 1);
+                        if (!h)
+                                return -ENOMEM;
+                }
+
+        } else {
+                if (isempty(s))
+                        return -EINVAL;
+
+                if (ret_host) {
+                        h = strdup(s);
+                        if (!h)
+                                return -ENOMEM;
+                }
+        }
+
+        if (ret_user)
+                *ret_user = TAKE_PTR(u);
+        if (ret_host)
+                *ret_host = TAKE_PTR(h);
+
+        return !!rhs; /* return > 0 if '@' was specified, 0 otherwise */
+}
+
+int machine_spec_valid(const char *s) {
+        _cleanup_free_ char *u = NULL, *h = NULL;
+        int r;
+
+        assert(s);
+
+        r = split_user_at_host(s, &u, &h);
+        if (r == -EINVAL)
+                return false;
+        if (r < 0)
+                return r;
+
+        if (u && !valid_user_group_name(u, VALID_USER_RELAX | VALID_USER_ALLOW_NUMERIC))
+                return false;
+
+        if (h && !hostname_is_valid(h, VALID_HOSTNAME_DOT_HOST))
+                return false;
+
+        return true;
 }

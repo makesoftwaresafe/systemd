@@ -2,14 +2,17 @@
 
 #include <unistd.h>
 
+#include "sd-event.h"
 #include "sd-varlink.h"
 
 #include "bus-polkit.h"
 #include "fd-util.h"
+#include "hashmap.h"
 #include "json-util.h"
 #include "lldp-rx-internal.h"
 #include "network-util.h"
 #include "networkd-dhcp-server.h"
+#include "networkd-link.h"
 #include "networkd-manager.h"
 #include "networkd-manager-varlink.h"
 #include "stat-util.h"

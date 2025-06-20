@@ -1,17 +1,19 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <errno.h>
+#include <stdlib.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "alloc-util.h"
 #include "env-file.h"
-#include "env-file-label.h"
 #include "env-util.h"
 #include "errno-util.h"
 #include "fd-util.h"
 #include "locale-setup.h"
+#include "log.h"
 #include "proc-cmdline.h"
 #include "stat-util.h"
+#include "string-util.h"
 #include "strv.h"
 
 void locale_context_clear(LocaleContext *c) {
@@ -69,7 +71,7 @@ static int locale_context_load_conf(LocaleContext *c, LocaleLoadFlag flag) {
         if (fd == -ENOENT)
                 return 0;
         if (fd < 0)
-                return log_debug_errno(errno, "Failed to open /etc/locale.conf: %m");
+                return log_debug_errno(errno, "Failed to open %s: %m", "/etc/locale.conf");
 
         if (fstat(fd, &st) < 0)
                 return log_debug_errno(errno, "Failed to stat /etc/locale.conf: %m");
@@ -209,7 +211,12 @@ int locale_context_save(LocaleContext *c, char ***ret_set, char ***ret_unset) {
                 return 0;
         }
 
-        r = write_env_file_label(AT_FDCWD, "/etc/locale.conf", NULL, set);
+        r = write_env_file(
+                        AT_FDCWD,
+                        "/etc/locale.conf",
+                        /* headers= */ NULL,
+                        set,
+                        WRITE_ENV_FILE_LABEL);
         if (r < 0)
                 return r;
 

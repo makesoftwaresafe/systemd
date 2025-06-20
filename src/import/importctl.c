@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <getopt.h>
+#include <locale.h>
 
 #include "sd-bus.h"
+#include "sd-event.h"
 
 #include "alloc-util.h"
 #include "build.h"
@@ -12,12 +14,9 @@
 #include "discover-image.h"
 #include "fd-util.h"
 #include "format-table.h"
-#include "hostname-util.h"
 #include "import-common.h"
 #include "import-util.h"
-#include "locale-util.h"
 #include "log.h"
-#include "macro.h"
 #include "main-func.h"
 #include "os-util.h"
 #include "pager.h"
@@ -26,9 +25,10 @@
 #include "path-util.h"
 #include "polkit-agent.h"
 #include "pretty-print.h"
-#include "signal-util.h"
-#include "sort-util.h"
+#include "runtime-scope.h"
 #include "string-table.h"
+#include "string-util.h"
+#include "strv.h"
 #include "verbs.h"
 #include "web-util.h"
 
@@ -195,7 +195,7 @@ static int transfer_image_common(sd_bus *bus, sd_bus_message *m) {
                         bus_import_mgr,
                         "TransferRemoved",
                         match_transfer_removed,
-                        /* add_callback= */ NULL,
+                        /* install_callback= */ NULL,
                         &c);
         if (r < 0)
                 return log_error_errno(r, "Failed to request match: %m");
@@ -204,11 +204,11 @@ static int transfer_image_common(sd_bus *bus, sd_bus_message *m) {
                         bus,
                         &slot_log_message,
                         "org.freedesktop.import1",
-                        /* object_path= */ NULL,
+                        /* path= */ NULL,
                         "org.freedesktop.import1.Transfer",
                         "LogMessage",
                         match_log_message,
-                        /* add_callback= */ NULL,
+                        /* install_callback= */ NULL,
                         &c);
         if (r < 0)
                 return log_error_errno(r, "Failed to request match: %m");
@@ -217,11 +217,11 @@ static int transfer_image_common(sd_bus *bus, sd_bus_message *m) {
                         bus,
                         &slot_progress_update,
                         "org.freedesktop.import1",
-                        /* object_path= */ NULL,
+                        /* path= */ NULL,
                         "org.freedesktop.import1.Transfer",
                         "ProgressUpdate",
                         match_progress_update,
-                        /* add_callback= */ NULL,
+                        /* install_callback= */ NULL,
                         &c);
         if (r < 0)
                 return log_error_errno(r, "Failed to request match: %m");
@@ -1111,8 +1111,9 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case 'M':
-                        arg_transport = BUS_TRANSPORT_MACHINE;
-                        arg_host = optarg;
+                        r = parse_machine_argument(optarg, &arg_host, &arg_transport);
+                        if (r < 0)
+                                return r;
                         break;
 
                 case ARG_READ_ONLY:

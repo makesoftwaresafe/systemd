@@ -1,19 +1,11 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-#include <errno.h>
-#include <stdarg.h>
-#include <stdbool.h>
-#include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <syslog.h>
 
-#include "assert-util.h"
-#include "macro.h"
-
-/* Some structures we reference but don't want to pull in headers for */
-struct iovec;
-struct signalfd_siginfo;
+#include "forward.h"
 
 typedef enum LogTarget{
         LOG_TARGET_CONSOLE,

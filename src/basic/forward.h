@@ -1,9 +1,12 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
+/* IWYU pragma: always_keep */
+
 #include <errno.h>              /* IWYU pragma: export */
 #include <inttypes.h>           /* IWYU pragma: export */
 #include <limits.h>             /* IWYU pragma: export */
+#include <paths.h>              /* IWYU pragma: export */
 #include <stdarg.h>             /* IWYU pragma: export */
 #include <stdbool.h>            /* IWYU pragma: export */
 #include <stddef.h>             /* IWYU pragma: export */
@@ -20,10 +23,11 @@
 typedef uint64_t usec_t;
 typedef uint64_t nsec_t;
 
-/* Libc forward declarations */
+/* Libc/Linux forward declarations */
 
 struct dirent;
 struct ether_addr;
+struct fiemap;
 struct file_handle;
 struct glob_t;
 struct group;
@@ -54,9 +58,10 @@ struct ucred;
  * used for C++ symbol name mangling, they're effectively part of the ABI and won't actually change. */
 typedef struct _IO_FILE FILE;
 typedef struct __dirstream DIR;
-typedef __socklen_t socklen_t;
 
 /* 3rd-party library forward declarations */
+
+enum bpf_map_type;
 
 struct fdisk_context;
 struct fdisk_table;
@@ -76,6 +81,12 @@ struct iovec_wrapper;
 union in_addr_union;
 union sockaddr_union;
 
+typedef enum CGroupFlags CGroupFlags;
+typedef enum CGroupMask CGroupMask;
+typedef enum ChaseFlags ChaseFlags;
+typedef enum ExtractFlags ExtractFlags;
+typedef enum Glyph Glyph;
+typedef enum ImageClass ImageClass;
 typedef enum JobMode JobMode;
 typedef enum RuntimeScope RuntimeScope;
 typedef enum TimestampStyle TimestampStyle;
@@ -223,8 +234,12 @@ typedef struct sd_hwdb sd_hwdb;
 
 /* shared/ forward declarations */
 
+typedef int (*copy_progress_bytes_t)(uint64_t n_bytes, void *userdata);
+typedef int (*copy_progress_path_t)(const char *path, const struct stat *st, void *userdata);
+
 struct local_address;
 struct in_addr_prefix;
+struct in_addr_full;
 
 typedef enum AskPasswordFlags AskPasswordFlags;
 typedef enum BootEntryTokenType BootEntryTokenType;
@@ -237,11 +252,14 @@ typedef enum DnsOverTlsMode DnsOverTlsMode;
 typedef enum DnssecMode DnssecMode;
 typedef enum Fido2EnrollFlags Fido2EnrollFlags;
 typedef enum KeySourceType KeySourceType;
+typedef enum LabelFixFlags LabelFixFlags;
 typedef enum MountInNamespaceFlags MountInNamespaceFlags;
 typedef enum NamePolicy NamePolicy;
+typedef enum OutputFlags OutputFlags;
 typedef enum OutputMode OutputMode;
 typedef enum PagerFlags PagerFlags;
 typedef enum PatternCompileCase PatternCompileCase;
+typedef enum RemoveFlags RemoveFlags;
 typedef enum ResolveSupport ResolveSupport;
 typedef enum TPM2Flags TPM2Flags;
 typedef enum Tpm2Support Tpm2Support;
@@ -249,11 +267,14 @@ typedef enum Tpm2UserspaceEventType Tpm2UserspaceEventType;
 typedef enum UnitFileFlags UnitFileFlags;
 typedef enum UnitFilePresetMode UnitFilePresetMode;
 typedef enum UnitFileState UnitFileState;
+typedef enum UnitType UnitType;
+typedef enum UserDBFlags UserDBFlags;
 typedef enum UserRecordLoadFlags UserRecordLoadFlags;
 typedef enum UserStorage UserStorage;
 
 typedef struct Bitmap Bitmap;
 typedef struct BPFProgram BPFProgram;
+typedef struct BusObjectImplementation BusObjectImplementation;
 typedef struct CalendarSpec CalendarSpec;
 typedef struct Condition Condition;
 typedef struct ConfigSection ConfigSection;
@@ -265,6 +286,7 @@ typedef struct FirewallContext FirewallContext;
 typedef struct GroupRecord GroupRecord;
 typedef struct Image Image;
 typedef struct ImagePolicy ImagePolicy;
+typedef struct InstallInfo InstallInfo;
 typedef struct LookupPaths LookupPaths;
 typedef struct LoopDevice LoopDevice;
 typedef struct MountOptions MountOptions;
@@ -286,7 +308,7 @@ typedef struct VeritySettings VeritySettings;
 #define AT_FDCWD                -100
 #define AT_EMPTY_PATH           0x1000
 #define AT_SYMLINK_FOLLOW       0x400
-#define AT_SYMLINK_NOFOLLOW	0x100
+#define AT_SYMLINK_NOFOLLOW     0x100
 
 #define MODE_INVALID            ((mode_t) -1)
 

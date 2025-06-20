@@ -3,11 +3,13 @@
 #include <linux/if.h>
 #include <unistd.h>
 
+#include "sd-netlink.h"
 #include "sd-network.h"
 
 #include "alloc-util.h"
 #include "dns-domain.h"
 #include "env-file.h"
+#include "extract-word.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
@@ -22,7 +24,9 @@
 #include "resolved-dns-server.h"
 #include "resolved-link.h"
 #include "resolved-llmnr.h"
+#include "resolved-manager.h"
 #include "resolved-mdns.h"
+#include "set.h"
 #include "socket-netlink.h"
 #include "stat-util.h"
 #include "string-util.h"
@@ -139,7 +143,7 @@ void link_allocate_scopes(Link *l) {
                 if (!l->unicast_scope) {
                         dns_server_reset_features_all(l->dns_servers);
 
-                        r = dns_scope_new(l->manager, &l->unicast_scope, l, DNS_PROTOCOL_DNS, AF_UNSPEC);
+                        r = dns_scope_new(l->manager, &l->unicast_scope, DNS_SCOPE_LINK, l, /* delegate= */ NULL, DNS_PROTOCOL_DNS, AF_UNSPEC);
                         if (r < 0)
                                 log_link_warning_errno(l, r, "Failed to allocate DNS scope, ignoring: %m");
                 }
@@ -149,7 +153,7 @@ void link_allocate_scopes(Link *l) {
         if (link_relevant(l, AF_INET, true) &&
             link_get_llmnr_support(l) != RESOLVE_SUPPORT_NO) {
                 if (!l->llmnr_ipv4_scope) {
-                        r = dns_scope_new(l->manager, &l->llmnr_ipv4_scope, l, DNS_PROTOCOL_LLMNR, AF_INET);
+                        r = dns_scope_new(l->manager, &l->llmnr_ipv4_scope, DNS_SCOPE_LINK, l, /* delegate= */ NULL, DNS_PROTOCOL_LLMNR, AF_INET);
                         if (r < 0)
                                 log_link_warning_errno(l, r, "Failed to allocate LLMNR IPv4 scope, ignoring: %m");
                 }
@@ -159,7 +163,7 @@ void link_allocate_scopes(Link *l) {
         if (link_relevant(l, AF_INET6, true) &&
             link_get_llmnr_support(l) != RESOLVE_SUPPORT_NO) {
                 if (!l->llmnr_ipv6_scope) {
-                        r = dns_scope_new(l->manager, &l->llmnr_ipv6_scope, l, DNS_PROTOCOL_LLMNR, AF_INET6);
+                        r = dns_scope_new(l->manager, &l->llmnr_ipv6_scope, DNS_SCOPE_LINK, l, /* delegate= */ NULL, DNS_PROTOCOL_LLMNR, AF_INET6);
                         if (r < 0)
                                 log_link_warning_errno(l, r, "Failed to allocate LLMNR IPv6 scope, ignoring: %m");
                 }
@@ -169,7 +173,7 @@ void link_allocate_scopes(Link *l) {
         if (link_relevant(l, AF_INET, true) &&
             link_get_mdns_support(l) != RESOLVE_SUPPORT_NO) {
                 if (!l->mdns_ipv4_scope) {
-                        r = dns_scope_new(l->manager, &l->mdns_ipv4_scope, l, DNS_PROTOCOL_MDNS, AF_INET);
+                        r = dns_scope_new(l->manager, &l->mdns_ipv4_scope, DNS_SCOPE_LINK, l, /* delegate= */ NULL, DNS_PROTOCOL_MDNS, AF_INET);
                         if (r < 0)
                                 log_link_warning_errno(l, r, "Failed to allocate mDNS IPv4 scope, ignoring: %m");
                 }
@@ -179,7 +183,7 @@ void link_allocate_scopes(Link *l) {
         if (link_relevant(l, AF_INET6, true) &&
             link_get_mdns_support(l) != RESOLVE_SUPPORT_NO) {
                 if (!l->mdns_ipv6_scope) {
-                        r = dns_scope_new(l->manager, &l->mdns_ipv6_scope, l, DNS_PROTOCOL_MDNS, AF_INET6);
+                        r = dns_scope_new(l->manager, &l->mdns_ipv6_scope, DNS_SCOPE_LINK, l, /* delegate= */ NULL, DNS_PROTOCOL_MDNS, AF_INET6);
                         if (r < 0)
                                 log_link_warning_errno(l, r, "Failed to allocate mDNS IPv6 scope, ignoring: %m");
                 }
@@ -279,7 +283,7 @@ static int link_update_dns_server_one(Link *l, const char *str) {
                 return 0;
         }
 
-        return dns_server_new(l->manager, NULL, DNS_SERVER_LINK, l, family, &a, port, 0, name, RESOLVE_CONFIG_SOURCE_NETWORKD);
+        return dns_server_new(l->manager, /* ret= */ NULL, DNS_SERVER_LINK, l, /* delegate= */ NULL, family, &a, port, 0, name, RESOLVE_CONFIG_SOURCE_NETWORKD);
 }
 
 static int link_update_dns_servers(Link *l) {
@@ -498,7 +502,7 @@ static int link_update_search_domain_one(Link *l, const char *name, bool route_o
         if (r > 0)
                 dns_search_domain_move_back_and_unmark(d);
         else {
-                r = dns_search_domain_new(l->manager, &d, DNS_SEARCH_DOMAIN_LINK, l, name);
+                r = dns_search_domain_new(l->manager, &d, DNS_SEARCH_DOMAIN_LINK, l, /* delegate= */ NULL, name);
                 if (r < 0)
                         return r;
         }
@@ -670,14 +674,35 @@ int link_update(Link *l) {
         return 0;
 }
 
+static bool link_has_link_local_dns(Link *l, int family) {
+
+        /* Check if the link has a link-local dns server for the specified family */
+
+        LIST_FOREACH(servers, s, l->dns_servers)
+                if ((family == AF_UNSPEC || s->family == family) &&
+                    in_addr_is_link_local(s->family, &s->address))
+                        return true;
+
+        return false;
+}
+
 bool link_relevant(Link *l, int family, bool local_multicast) {
+        bool allow_link_local;
+
         assert(l);
 
-        /* A link is relevant for local multicast traffic if it isn't a loopback device, has a link
-         * beat, can do multicast and has at least one link-local (or better) IP address.
-         *
-         * A link is relevant for non-multicast traffic if it isn't a loopback device, has a link beat, and has at
-         * least one routable address. */
+        /*
+         * A link is relevant if:
+         * - it isn't a loopback device
+         * - has a link beat
+         * - for multicast traffic:
+         *   - can do multicast
+         *   - has at least one link-local (or better) IP address.
+         * - for non-multicast traffic:
+         *   - has at least one address that must be:
+         *     - At least link-local, if using a link-local dns server to this interface.
+         *     - Better than link-local.
+         */
 
         if ((l->flags & (IFF_LOOPBACK | IFF_DORMANT)) != 0)
                 return false;
@@ -696,8 +721,11 @@ bool link_relevant(Link *l, int family, bool local_multicast) {
             !IN_SET(l->networkd_operstate, LINK_OPERSTATE_DEGRADED_CARRIER, LINK_OPERSTATE_DEGRADED, LINK_OPERSTATE_ROUTABLE))
                 return false;
 
+        allow_link_local = local_multicast || link_has_link_local_dns(l, family);
+
         LIST_FOREACH(addresses, a, l->addresses)
-                if ((family == AF_UNSPEC || a->family == family) && link_address_relevant(a, local_multicast))
+                if ((family == AF_UNSPEC || a->family == family) &&
+                    link_address_relevant(a, allow_link_local))
                         return true;
 
         return false;
@@ -1175,13 +1203,13 @@ int link_address_update_rtnl(LinkAddress *a, sd_netlink_message *m) {
         return 0;
 }
 
-bool link_address_relevant(LinkAddress *a, bool local_multicast) {
+bool link_address_relevant(LinkAddress *a, bool allow_link_local) {
         assert(a);
 
         if (a->flags & (IFA_F_DEPRECATED|IFA_F_TENTATIVE))
                 return false;
 
-        if (a->scope >= (local_multicast ? RT_SCOPE_HOST : RT_SCOPE_LINK))
+        if (a->scope >= (allow_link_local ? RT_SCOPE_HOST : RT_SCOPE_LINK))
                 return false;
 
         return true;

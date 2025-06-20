@@ -1,14 +1,11 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
-#include <stdbool.h>
-#include <stddef.h>
 #include <string.h>
-#include <sys/types.h>
 
 #include "alloc-util.h"
-#include "macro.h"
-#include "string-util-fundamental.h"
+#include "forward.h"
+#include "string-util-fundamental.h" /* IWYU pragma: export */
 
 static inline char* strstr_ptr(const char *haystack, const char *needle) {
         if (!haystack || !needle)
@@ -89,7 +86,6 @@ static inline const char* empty_or_dash_to_null(const char *p) {
 
 char* first_word(const char *s, const char *word) _pure_;
 
-char* strprepend(char **x, const char *s);
 char* strextendn(char **x, const char *s, size_t l) _nonnull_if_nonzero_(2, 3);
 
 #define strjoin(a, ...) strextend_with_separator_internal(NULL, NULL, a, __VA_ARGS__, NULL)
@@ -127,11 +123,11 @@ static inline char* skip_leading_chars(const char *s, const char *bad) {
         return (char*) s + strspn(s, bad);
 }
 
-char ascii_tolower(char x);
+char ascii_tolower(char x) _const_;
 char* ascii_strlower(char *s);
 char* ascii_strlower_n(char *s, size_t n);
 
-char ascii_toupper(char x);
+char ascii_toupper(char x) _const_;
 char* ascii_strupper(char *s);
 
 int ascii_strcasecmp_n(const char *a, const char *b, size_t n);
@@ -179,6 +175,18 @@ char* strextend_with_separator_internal(char **x, const char *separator, ...) _s
 
 int strextendf_with_separator(char **x, const char *separator, const char *format, ...) _printf_(3,4);
 #define strextendf(x, ...) strextendf_with_separator(x, NULL, __VA_ARGS__)
+
+#define strprepend_with_separator(x, separator, ...)                            \
+        ({                                                                      \
+                char **_p_ = ASSERT_PTR(x), *_s_;                               \
+                _s_ = strextend_with_separator_internal(NULL, (separator), __VA_ARGS__, empty_to_null(*_p_), NULL); \
+                if (_s_) {                                                      \
+                        free(*_p_);                                             \
+                        *_p_ = _s_;                                             \
+                }                                                               \
+                _s_;                                                            \
+        })
+#define strprepend(x, ...) strprepend_with_separator(x, NULL, __VA_ARGS__)
 
 char* strrep(const char *s, unsigned n);
 
@@ -260,7 +268,7 @@ typedef enum MakeCStringMode {
 
 int make_cstring(const char *s, size_t n, MakeCStringMode mode, char **ret);
 
-size_t strspn_from_end(const char *str, const char *accept);
+size_t strspn_from_end(const char *str, const char *accept) _pure_;
 
 char* strdupspn(const char *a, const char *accept);
 char* strdupcspn(const char *a, const char *reject);
@@ -279,13 +287,14 @@ char* strdupcspn(const char *a, const char *reject);
         })
 
 char* find_line_startswith(const char *haystack, const char *needle);
+char* find_line(const char *haystack, const char *needle);
+char* find_line_after(const char *haystack, const char *needle);
 
-bool version_is_valid(const char *s);
-
-bool version_is_valid_versionspec(const char *s);
+bool version_is_valid(const char *s) _pure_;
+bool version_is_valid_versionspec(const char *s) _pure_;
 
 ssize_t strlevenshtein(const char *x, const char *y);
 
-char* strrstr(const char *haystack, const char *needle);
+char* strrstr(const char *haystack, const char *needle) _pure_;
 
-size_t str_common_prefix(const char *a, const char *b);
+size_t str_common_prefix(const char *a, const char *b) _pure_;

@@ -2,15 +2,12 @@
 
 #include <fcntl.h>
 #include <linux/btrfs.h>
-#include <stdlib.h>
 #include <sys/ioctl.h>
 
 #include "device-util.h"
 #include "errno-util.h"
 #include "fd-util.h"
-#include "missing_fs.h"
 #include "string-util.h"
-#include "strxcpyx.h"
 #include "udev-builtin.h"
 
 static int builtin_btrfs(UdevEvent *event, int argc, char *argv[]) {
@@ -46,7 +43,7 @@ static int builtin_btrfs(UdevEvent *event, int argc, char *argv[]) {
                         return 0;
                 }
 
-                return log_device_debug_errno(dev, errno, "Failed to open /dev/btrfs-control: %m");
+                return log_device_debug_errno(dev, errno, "Failed to open %s: %m", "/dev/btrfs-control");
         }
 
         struct btrfs_ioctl_vol_args args = {};
